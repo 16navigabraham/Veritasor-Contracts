@@ -268,6 +268,13 @@ impl AttestationContract {
         dynamic_fees::get_business_count(&env, &business)
     }
 
+    /// Returns the volume discount in basis points for a business's current
+    /// cumulative attestation count.
+    pub fn get_volume_discount(env: Env, business: Address) -> u32 {
+        let count = dynamic_fees::get_business_count(&env, &business);
+        dynamic_fees::volume_discount_for_count(&env, count)
+    }
+
     pub fn get_replay_nonce(env: Env, actor: Address, channel: u32) -> u64 {
         replay_protection::get_nonce(&env, &actor, channel)
     }
