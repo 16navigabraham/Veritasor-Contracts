@@ -82,8 +82,8 @@ impl TestEnv {
         self.client.get_business_attestations(&business, &periods)
     }
 
-    pub fn pause(&self, admin: Address, nonce: u64) {
-        self.client.pause(&admin, &nonce);
+    pub fn pause(&self, admin: Address) {
+        self.client.pause(&admin, &0u64);
     }
 
     pub fn get_attestation_with_status(

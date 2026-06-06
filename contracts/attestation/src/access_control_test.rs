@@ -197,6 +197,7 @@ fn test_submit_attestation_when_paused() {
         &0i128,
         &None,
         &None,
+        &0u64,
     );
 }
 

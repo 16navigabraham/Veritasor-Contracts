@@ -567,7 +567,7 @@ fn prop_migration_succeeds_for_increasing_version() {
         client.submit_attestation(
             &business, &period, &old_root, &1_000_000, &old_ver, &0i128, &None, &None,
         );
-        client.migrate_attestation(&admin, &business, &period, &new_root, &new_ver);
+        client.migrate_attestation(&admin, &business, &period, &new_root, &new_ver, &0u64);
 
         let (got_root, _, got_ver, _, _, _) = client.get_attestation(&business, &period).unwrap();
         assert_eq!(
@@ -608,7 +608,14 @@ fn prop_migration_panics_for_non_increasing_version() {
             client.submit_attestation(
                 &business, &period, &old_root, &1_000_000, &old_ver, &0i128, &None, &None,
             );
-            client.migrate_attestation(&admin_addr, &business, &period, &new_root, &bad_new_ver);
+            client.migrate_attestation(
+                &admin_addr,
+                &business,
+                &period,
+                &new_root,
+                &bad_new_ver,
+                &0u64,
+            );
         }));
 
         let err = result.expect_err(&std::format!(
@@ -916,8 +923,8 @@ fn prop_unpause_restores_submission() {
     let period = String::from_str(&env, "2026-01");
     let root = BytesN::from_array(&env, &[1u8; 32]);
 
-    client.pause(&admin, &0u64);
-    client.unpause(&admin, &0u64);
+    client.pause(&client.get_admin(), &0u64);
+    client.unpause(&client.get_admin(), &0u64);
 
     // Must succeed after unpause.
     client.submit_attestation(&business, &period, &root, &1_000, &1, &0i128, &None, &None);
