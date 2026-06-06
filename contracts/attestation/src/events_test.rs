@@ -107,8 +107,9 @@ fn test_submit_attestation_emits_event() {
         &root,
         &1_700_000_000u64,
         &1u32,
-        &0i128, &None, &None,
-        &0u64,
+        &0i128,
+        &None,
+        &None,
     );
 
     assert!(
@@ -831,15 +832,15 @@ fn test_revoke_role_emits_event() {
 #[test]
 fn test_pause_emits_event() {
     let (env, client, admin) = setup();
-    client.pause(&admin);
+    client.pause(&admin, &0u64);
     assert!(!env.events().all().is_empty());
 }
 
 #[test]
 fn test_unpause_emits_event() {
     let (env, client, admin) = setup();
-    client.pause(&admin);
-    client.unpause(&admin);
+    client.pause(&admin, &0u64);
+    client.unpause(&admin, &0u64);
     assert!(!env.events().all().is_empty());
 }
 
@@ -888,9 +889,7 @@ fn test_migrate_same_version_panics_no_event() {
 
     let events_before_migration = env.events().all().len();
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.migrate_attestation(&admin, &business, &period, &new_root, &1u32);
-    }));
+    let result = client.try_migrate_attestation(&admin, &business, &period, &new_root, &1u32);
 
     assert!(result.is_err(), "expected same-version migration to panic");
     assert_eq!(
@@ -1217,4 +1216,3 @@ fn test_all_topic_symbols_are_distinct() {
     assert_eq!(topics.len(), 19, "expected 19 distinct topic symbols");
     let _ = env; // env required for Address::generate in other tests
 }
-

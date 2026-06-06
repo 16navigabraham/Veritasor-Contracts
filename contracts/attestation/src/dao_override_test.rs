@@ -12,46 +12,86 @@ use super::*;
 
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::StellarAssetClient;
-use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String};
+use soroban_sdk::{Address, BytesN, Env, String};
 
 // ── Mock DAO contracts ────────────────────────────────────────────────
+// Each mock lives in its own module to prevent `#[contractimpl]` from
+// generating duplicate `__get_attestation_fee_config` / `__SPEC_XDR_FN_…`
+// symbols at crate scope.
 
-/// Returns a fixed dynamic fee config: base_fee=2000, enabled=true.
-#[contract]
-struct MockDaoEnabled;
+mod mock_dao_enabled {
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, Address, Env};
 
-#[contractimpl]
-impl MockDaoEnabled {
-    pub fn get_attestation_fee_config(env: Env) -> Option<(Address, Address, i128, bool)> {
-        let token = Address::generate(&env);
-        let collector = Address::generate(&env);
-        Some((token, collector, 2_000i128, true))
+    /// Returns a fixed dynamic fee config: base_fee=2000, enabled=true.
+    #[contract]
+    pub struct MockDaoEnabled;
+
+    #[contractimpl]
+    impl MockDaoEnabled {
+        pub fn get_attestation_fee_config(env: Env) -> Option<(Address, Address, i128, bool)> {
+            let token = Address::generate(&env);
+            let collector = Address::generate(&env);
+            Some((token, collector, 2_000i128, true))
+        }
     }
 }
 
-/// Returns None — simulates a DAO that has no config set.
-#[contract]
-struct MockDaoNone;
+mod mock_dao_none {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
 
-#[contractimpl]
-impl MockDaoNone {
-    pub fn get_attestation_fee_config(_env: Env) -> Option<(Address, Address, i128, bool)> {
-        None
+    /// Returns None — simulates a DAO that has no config set.
+    #[contract]
+    pub struct MockDaoNone;
+
+    #[contractimpl]
+    impl MockDaoNone {
+        pub fn get_attestation_fee_config(_env: Env) -> Option<(Address, Address, i128, bool)> {
+            None
+        }
     }
 }
 
-/// Returns a config with enabled=false — fees disabled via DAO.
-#[contract]
-struct MockDaoDisabled;
+mod mock_dao_disabled {
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, Address, Env};
 
-#[contractimpl]
-impl MockDaoDisabled {
-    pub fn get_attestation_fee_config(env: Env) -> Option<(Address, Address, i128, bool)> {
-        let token = Address::generate(&env);
-        let collector = Address::generate(&env);
-        Some((token, collector, 5_000i128, false))
+    /// Returns a config with enabled=false — fees disabled via DAO.
+    #[contract]
+    pub struct MockDaoDisabled;
+
+    #[contractimpl]
+    impl MockDaoDisabled {
+        pub fn get_attestation_fee_config(env: Env) -> Option<(Address, Address, i128, bool)> {
+            let token = Address::generate(&env);
+            let collector = Address::generate(&env);
+            Some((token, collector, 5_000i128, false))
+        }
     }
 }
+
+mod mock_dao_same_token {
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{contract, contractimpl, Address, Env};
+
+    /// Returns base_fee=2000, enabled=true (same token/collector as local).
+    #[contract]
+    pub struct MockDaoSameToken;
+
+    #[contractimpl]
+    impl MockDaoSameToken {
+        pub fn get_attestation_fee_config(env: Env) -> Option<(Address, Address, i128, bool)> {
+            let token = Address::generate(&env);
+            let collector = Address::generate(&env);
+            Some((token, collector, 2_000i128, true))
+        }
+    }
+}
+
+use mock_dao_disabled::MockDaoDisabled;
+use mock_dao_enabled::MockDaoEnabled;
+use mock_dao_none::MockDaoNone;
+use mock_dao_same_token::MockDaoSameToken;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -62,7 +102,8 @@ fn base_env() -> (Env, Address, Address, Address) {
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin);
     let token_addr = token_contract.address().clone();
-    (env, admin, token_addr, Address::generate(&env))
+    let random_addr = Address::generate(&env);
+    (env, admin, token_addr, random_addr)
 }
 
 fn setup_contract<'a>(
@@ -86,7 +127,16 @@ fn mint(env: &Env, token_addr: &Address, to: &Address, amount: i128) {
 fn submit(client: &AttestationContractClient, env: &Env, business: &Address, idx: u32) {
     let period = String::from_str(env, &std::format!("P-{idx:04}"));
     let root = BytesN::from_array(env, &[idx as u8; 32]);
-    client.submit_attestation(business, &period, &root, &1_700_000_000u64, &1u32, &0i128, &None, &None);
+    client.submit_attestation(
+        business,
+        &period,
+        &root,
+        &1_700_000_000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
+    );
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -166,19 +216,6 @@ fn test_dao_override_charges_dao_fee_on_submit() {
     let client = setup_contract(&env, &admin, &token_addr, &collector, 1_000);
 
     // Register a DAO that returns base_fee=2000 with the same token
-    #[contract]
-    struct MockDaoSameToken;
-    #[contractimpl]
-    impl MockDaoSameToken {
-        pub fn get_attestation_fee_config(env: Env) -> Option<(Address, Address, i128, bool)> {
-            // We can't easily share the outer token_addr here, so we verify
-            // via get_fee_quote instead of balance checks.
-            let token = Address::generate(&env);
-            let collector = Address::generate(&env);
-            Some((token, collector, 2_000i128, true))
-        }
-    }
-
     let dao_id = env.register(MockDaoSameToken, ());
     client.set_dao(&dao_id);
 

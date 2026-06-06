@@ -195,7 +195,7 @@ fn test_execute_unpause_proposal() {
     let owner2 = owners.get(1).unwrap();
 
     // First pause (admin nonce 2 after init 0, init_multisig 1)
-    client.pause(&admin);
+    client.pause(&admin, &0u64);
     assert!(client.is_paused());
 
     // Create unpause proposal (admin multisig nonce 0)
@@ -334,7 +334,8 @@ fn test_proposal_expiration() {
 
     // Advance ledger sequence beyond expiry
     let current_seq = env.ledger().sequence();
-    env.ledger().set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
+    env.ledger()
+        .set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.approve_proposal(&owner2, &proposal_id, &0u64);
@@ -353,7 +354,8 @@ fn test_approve_expired_proposal_panics() {
     let proposal_id = client.create_proposal(&admin, &ProposalAction::Pause, &0u64);
 
     let current_seq = env.ledger().sequence();
-    env.ledger().set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
+    env.ledger()
+        .set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
 
     client.approve_proposal(&owner2, &proposal_id, &0u64);
 }
@@ -366,12 +368,11 @@ fn test_expired_proposal_status_update() {
     let proposal_id = client.create_proposal(&admin, &ProposalAction::Pause, &0u64);
 
     let current_seq = env.ledger().sequence();
-    env.ledger().set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
+    env.ledger()
+        .set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
 
     // We catch the panic to check the status
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.approve_proposal(&owner2, &proposal_id, &0u64);
-    }));
+    let _ = client.try_approve_proposal(&owner2, &proposal_id, &0u64);
 
     let proposal = client.get_proposal(&proposal_id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Expired);
@@ -390,7 +391,8 @@ fn test_execute_expired_proposal_panics() {
 
     // Advance ledger sequence beyond expiry
     let current_seq = env.ledger().sequence();
-    env.ledger().set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
+    env.ledger()
+        .set_sequence_number(current_seq + DEFAULT_PROPOSAL_EXPIRY + 1);
 
     client.execute_proposal(&admin, &proposal_id, &1u64);
 }
@@ -587,7 +589,7 @@ fn test_owner_cannot_approve_twice() {
 }
 
 #[test]
-fn test_non_owner_cannot_approve() {
+fn test_non_owner_cannot_approve_duplicate() {
     let env = Env::default();
 
     let owner = Address::generate(&env);

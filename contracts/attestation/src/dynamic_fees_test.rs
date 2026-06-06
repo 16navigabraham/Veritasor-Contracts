@@ -397,7 +397,9 @@ fn test_no_fee_config_free() {
 
     let period = String::from_str(&env, "2026-01");
     let root = BytesN::from_array(&env, &[1u8; 32]);
-    client.submit_attestation(&business, &period, &root, &1u64, &1u32, &0i128, &None, &None);
+    client.submit_attestation(
+        &business, &period, &root, &1u64, &1u32, &0i128, &None, &None,
+    );
 
     let (_, _, _, fee_paid, _, _) = client.get_attestation(&business, &period).unwrap();
     assert_eq!(fee_paid, 0);
@@ -758,7 +760,7 @@ fn test_volume_brackets_multiple_valid_discounts() {
     let discounts = vec![&t.env, 10_000u32, 10_000u32, 10_000u32];
     t.client.set_volume_brackets(&thresholds, &discounts);
 
-    let business = Address::generate(&t.env);
+    let _business = Address::generate(&t.env);
     // Should not panic and brackets should be set
     let (got_thresholds, got_discounts) = t.client.get_volume_brackets();
     assert_eq!(got_thresholds, thresholds);
@@ -812,4 +814,3 @@ fn test_volume_brackets_descending_thresholds_rejected() {
     let discounts = vec![&t.env, 500u32, 1_000u32, 1_500u32];
     t.client.set_volume_brackets(&thresholds, &discounts);
 }
-

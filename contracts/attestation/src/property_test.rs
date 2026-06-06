@@ -51,6 +51,7 @@ use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{vec, Address, BytesN, Env, String};
+use std::format;
 
 // ════════════════════════════════════════════════════════════════════
 //  Shared setup helpers
@@ -888,7 +889,7 @@ fn prop_pause_blocks_all_submissions() {
             let client = AttestationContractClient::new(&env, &contract_id);
             let admin = Address::generate(&env);
             client.initialize(&admin, &0u64);
-            client.pause(&client.get_admin());
+            client.pause(&client.get_admin(), &0u64);
             let business = Address::generate(&env);
             let period = String::from_str(&env, &period_owned);
             let root = BytesN::from_array(&env, &[1u8; 32]);
@@ -915,8 +916,8 @@ fn prop_unpause_restores_submission() {
     let period = String::from_str(&env, "2026-01");
     let root = BytesN::from_array(&env, &[1u8; 32]);
 
-    client.pause(&client.get_admin());
-    client.unpause(&client.get_admin());
+    client.pause(&admin, &0u64);
+    client.unpause(&admin, &0u64);
 
     // Must succeed after unpause.
     client.submit_attestation(&business, &period, &root, &1_000, &1, &0i128, &None, &None);
@@ -1909,13 +1910,13 @@ proptest! {
         // If a new role is added, this reference AND the constant in access_control.rs must be updated.
         let is_valid_reference = (role_mask & !0xF) == 0;
         let actual_validation = access_control::is_valid_role_bitmap(role_mask);
-        
+
         prop_assert_eq!(
             actual_validation, is_valid_reference,
             "validation mismatch for bitmap {:#010X}: expected {}, got {}",
             role_mask, is_valid_reference, actual_validation
         );
-        
+
         // Assert that grant_role panics for any sampled invalid bitmap.
         if !is_valid_reference {
             let result = std::panic::catch_unwind(|| {

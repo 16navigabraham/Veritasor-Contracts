@@ -21,9 +21,18 @@ impl TestEnv {
         client.initialize(&admin, &0u64);
         Self { env, client, admin }
     }
-    
-    pub fn submit_attestation(&self, business: Address, period: String, root: BytesN<32>, timestamp: u64, version: u32) {
-        self.client.submit_attestation(&business, &period, &root, &timestamp, &version, &0i128, &None, &None);
+
+    pub fn submit_attestation(
+        &self,
+        business: Address,
+        period: String,
+        root: BytesN<32>,
+        timestamp: u64,
+        version: u32,
+    ) {
+        self.client.submit_attestation(
+            &business, &period, &root, &timestamp, &version, &0i128, &None, &None,
+        );
     }
 
     pub fn revoke_attestation(
@@ -73,16 +82,33 @@ impl TestEnv {
         self.client.get_business_attestations(&business, &periods)
     }
 
-    pub fn pause(&self, admin: Address) {
-        self.client.pause(&admin);
+    pub fn pause(&self, admin: Address, nonce: u64) {
+        self.client.pause(&admin, &nonce);
     }
 
-    pub fn get_attestation_with_status(&self, business: Address, period: String) -> Option<crate::AttestationWithRevocation> {
+    pub fn get_attestation_with_status(
+        &self,
+        business: Address,
+        period: String,
+    ) -> Option<crate::AttestationWithRevocation> {
         self.client.get_attestation_with_status(&business, &period)
     }
 
-    pub fn migrate_attestation(&self, caller: Address, business: Address, period: String, new_merkle_root: BytesN<32>, new_version: u32) {
-        self.client.migrate_attestation(&caller, &business, &period, &new_merkle_root, &new_version);
+    pub fn migrate_attestation(
+        &self,
+        caller: Address,
+        business: Address,
+        period: String,
+        new_merkle_root: BytesN<32>,
+        new_version: u32,
+    ) {
+        self.client.migrate_attestation(
+            &caller,
+            &business,
+            &period,
+            &new_merkle_root,
+            &new_version,
+        );
     }
 }
 use crate::{DisputeOutcome, DisputeStatus, DisputeType, OptionalResolution};
@@ -374,7 +400,7 @@ fn test_revocation_when_paused() {
         1,
     );
 
-    test.pause(test.admin.clone());
+    test.pause(test.admin.clone(), 0u64);
 
     test.revoke_attestation(
         test.admin.clone(),
@@ -1207,8 +1233,6 @@ fn test_closed_dispute_no_reopen_after_revoke() {
 //   8. Revocation of a non-existent attestation is rejected cleanly.
 
 use super::*;
-use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, BytesN, Env, String};
 
 /// Minimal test harness: registered contract + mock auths + initialized admin.
 fn setup_index_env() -> (Env, AttestationContractClient<'static>, Address) {
@@ -1269,7 +1293,7 @@ fn test_revocation_sequence_increments_per_revocation() {
     assert_eq!(seq0, 0u64);
 
     for i in 0u8..3 {
-        let period = String::from_str(&env, &soroban_sdk::format!("2026-{:02}", i + 1));
+        let period = String::from_str(&env, &std::format!("2026-{:02}", i + 1));
         client.submit_attestation(
             &business,
             &period,
@@ -1660,7 +1684,7 @@ fn test_paused_revocation_does_not_corrupt_index() {
         &None,
     );
 
-    client.pause(&admin);
+    client.pause(&admin, &0u64);
 
     let seq_before = client.get_revocation_sequence();
 
