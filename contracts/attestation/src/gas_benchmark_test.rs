@@ -412,11 +412,16 @@ fn bench_verify_attestation_cold_warm_comparison() {
             } else {
                 0.0
             };
-            std::println!("CPU savings: {} ({:.1}% reduction)", cpu_savings, cpu_savings_pct);
+            std::println!(
+                "CPU savings: {} ({:.1}% reduction)",
+                cpu_savings,
+                cpu_savings_pct
+            );
         } else {
             std::println!(
                 "CPU: cold={} warm={} (delta unavailable in test env)",
-                cold_cpu, warm_cpu
+                cold_cpu,
+                warm_cpu
             );
         }
 
@@ -427,11 +432,16 @@ fn bench_verify_attestation_cold_warm_comparison() {
             } else {
                 0.0
             };
-            std::println!("Memory savings: {} ({:.1}% reduction)", mem_savings, mem_savings_pct);
+            std::println!(
+                "Memory savings: {} ({:.1}% reduction)",
+                mem_savings,
+                mem_savings_pct
+            );
         } else {
             std::println!(
                 "Memory: cold={} warm={} (delta unavailable in test env)",
-                cold_mem, warm_mem
+                cold_mem,
+                warm_mem
             );
         }
 
@@ -459,7 +469,8 @@ fn bench_verify_attestation_cold_warm_comparison() {
 
         std::println!(
             "{{\"benchmark\": \"verify_attestation_nonexistent\", \"cpu\": {}, \"mem\": {}}}",
-            cost.cpu_insns, cost.mem_bytes
+            cost.cpu_insns,
+            cost.mem_bytes
         );
     }
 
