@@ -78,6 +78,26 @@ Based on Soroban's resource limits and operation complexity:
 | `grant_role` | < 250,000 | < 7,000 | Access control update |
 | `has_role` | < 80,000 | < 2,000 | Access control check |
 
+### Cold vs Warm Storage: verify_attestation
+
+Soroban's ledger maintains an entry cache that makes subsequent reads of the
+same entry cheaper than the first read in a given ledger:
+
+| Scenario | CPU Instructions | Memory Bytes | Notes |
+|----------|-----------------|--------------|-------|
+| `verify_attestation` (cold) | < 250,000 | < 8,000 | First read — entry not in cache |
+| `verify_attestation` (warm) | < 150,000 | < 5,000 | Subsequent read — entry cached |
+| `verify_attestation` (non-existent) | < 150,000 | < 5,000 | Failed lookup — no revocation check |
+
+**Key insight**: Warm reads benefit from Soroban's ledger entry cache,
+reducing I/O cost. Downstream indexers and lenders **should budget for cold
+reads as the worst-case scenario** when planning gas at scale.
+
+The cold/warm delta is most visible in ledger read bytes and read entry
+counts, which drop to near-zero on warm reads. The comparison report
+(`bench_verify_attestation_cold_warm_comparison`) emits JSON-formatted
+metrics suitable for automated gas planning pipelines.
+
 ### Regression Threshold
 
 Tests fail if costs exceed **150% of target values**, indicating a potential regression requiring investigation.
