@@ -1360,6 +1360,19 @@ impl AttestationContract {
         dispute::get_dispute(&env, dispute_id)
     }
 
+    /// Verify witness evidence Merkle proof against the disputed attestation's committed root.
+    ///
+    /// If valid, automatically resolves the dispute as `Upheld` and advances dispute status.
+    /// Rejects invalid proofs without modifying state.
+    pub fn submit_dispute_witness(
+        env: Env,
+        dispute_id: u64,
+        leaf: BytesN<32>,
+        proof: Vec<BytesN<32>>,
+    ) {
+        dispute::submit_dispute_witness(&env, dispute_id, &leaf, &proof).expect("witness verification failed");
+    }
+
     /// Return all dispute IDs associated with a specific attestation.
     pub fn get_disputes_by_attestation(env: Env, business: Address, period: String) -> Vec<u64> {
         dispute::get_dispute_ids_by_attestation(&env, &business, &period)
