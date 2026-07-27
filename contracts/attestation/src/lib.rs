@@ -1685,7 +1685,7 @@ mod fees_test;
 mod gas_benchmark_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod key_rotation_test;
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(test)]
 mod multi_period_test;
 #[cfg(test)]
 mod multisig_e2e_test;
