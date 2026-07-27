@@ -1166,6 +1166,35 @@ impl AttestationContract {
         fees::get_effective_flat_fee_config(&env)
     }
 
+    /// Returns the current epoch number.
+    pub fn get_current_epoch(env: Env) -> u64 {
+        fees::get_current_epoch(&env)
+    }
+
+    /// Admin: Advance to the next epoch and persist snapshot for the new epoch.
+    pub fn advance_epoch(env: Env) -> u64 {
+        dynamic_fees::require_admin(&env);
+        fees::advance_epoch(&env)
+    }
+
+    /// Admin: Set current epoch number and persist snapshot for that epoch.
+    pub fn set_current_epoch(env: Env, epoch: u64) {
+        dynamic_fees::require_admin(&env);
+        fees::set_current_epoch(&env, epoch);
+    }
+
+    /// Returns the effective flat fee config snapshot for a historical epoch.
+    pub fn get_fee_config_at_epoch(env: Env, epoch: u64) -> Option<FlatFeeConfig> {
+        fees::get_fee_config_at_epoch(&env, epoch)
+    }
+
+    /// Returns the historical fee quote at a specific epoch.
+    /// Solves fee-drift for auditors by returning the fee that applied at that epoch.
+    /// Returns 0 if fees were disabled/unconfigured or if epoch is uninitialized/pruned.
+    pub fn get_fee_quote_at_epoch(env: Env, epoch: u64) -> i128 {
+        fees::get_fee_quote_at_epoch(&env, epoch)
+    }
+
     pub fn get_fee_quote(env: Env, business: Address) -> i128 {
         let dynamic = dynamic_fees::calculate_fee(&env, &business);
         let flat = fees::calculate_flat_fee(&env);
