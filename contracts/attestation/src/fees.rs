@@ -218,4 +218,3 @@ pub fn persist_epoch_snapshot_for(env: &Env, epoch: u64) {
         .instance()
         .set(&FlatFeeDataKey::EpochHistory, &history);
 }
-

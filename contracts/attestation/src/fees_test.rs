@@ -1116,4 +1116,3 @@ fn test_epoch_snapshot_pruning_max_epoch_history() {
         assert_eq!(client.get_fee_quote_at_epoch(&active_epoch), 100);
     }
 }
-
