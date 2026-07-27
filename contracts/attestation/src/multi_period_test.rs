@@ -635,7 +635,14 @@ fn test_multi_period_boundary_u32_max_wide_range() {
 
     let root0 = BytesN::from_array(&env, &[0u8; 32]);
     let r0 = client.try_submit_multi_period_attestation(
-        &business, &0u32, &u32::MAX, &root0, &1000u64, &1u32, &None, &None,
+        &business,
+        &0u32,
+        &u32::MAX,
+        &root0,
+        &1000u64,
+        &1u32,
+        &None,
+        &None,
     );
     assert!(r0.is_ok(), "[0, u32::MAX] must be accepted");
 
@@ -658,7 +665,14 @@ fn test_multi_period_boundary_u32_max_edge() {
 
     let root0 = BytesN::from_array(&env, &[2u8; 32]);
     let r0 = client.try_submit_multi_period_attestation(
-        &business, &(u32::MAX - 10), &u32::MAX, &root0, &1000u64, &1u32, &None, &None,
+        &business,
+        &(u32::MAX - 10),
+        &u32::MAX,
+        &root0,
+        &1000u64,
+        &1u32,
+        &None,
+        &None,
     );
     assert!(r0.is_ok(), "[u32::MAX-10, u32::MAX] must be accepted");
 
@@ -666,7 +680,14 @@ fn test_multi_period_boundary_u32_max_edge() {
     // These touch at u32::MAX → overlap (boundary touch = overlap).
     let root1 = BytesN::from_array(&env, &[3u8; 32]);
     let r1 = client.try_submit_multi_period_attestation(
-        &business, &u32::MAX, &u32::MAX, &root1, &1000u64, &1u32, &None, &None,
+        &business,
+        &u32::MAX,
+        &u32::MAX,
+        &root1,
+        &1000u64,
+        &1u32,
+        &None,
+        &None,
     );
     assert!(
         r1.is_err(),
@@ -720,7 +741,14 @@ fn test_multi_period_boundary_inverted_extremes() {
     // Inverted: start > end at extremes.
     let root = BytesN::from_array(&env, &[7u8; 32]);
     let r = client.try_submit_multi_period_attestation(
-        &business, &u32::MAX, &0u32, &root, &1000u64, &1u32, &None, &None,
+        &business,
+        &u32::MAX,
+        &0u32,
+        &root,
+        &1000u64,
+        &1u32,
+        &None,
+        &None,
     );
     assert!(r.is_err(), "[u32::MAX, 0] inverted must be rejected");
 

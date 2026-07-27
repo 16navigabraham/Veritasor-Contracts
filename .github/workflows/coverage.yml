@@ -44,7 +44,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate workspace lcov report
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.txt
+        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.txt
 
       - name: Upload lcov report
         uses: actions/upload-artifact@v4
