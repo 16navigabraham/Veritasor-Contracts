@@ -10,7 +10,7 @@
 #![allow(clippy::too_many_arguments)]
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, String,
+    contract, contractimpl, contracttype, token, Address, Env, String,
 };
 use veritasor_common::replay_protection;
 

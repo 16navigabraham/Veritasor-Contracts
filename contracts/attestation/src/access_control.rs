@@ -383,6 +383,7 @@ pub fn role_from_name(name: &str) -> u32 {
 
 /// Emit an event when a role is granted.
 /// SECURITY: Provides audit trail for all role changes
+#[allow(dead_code)]
 fn emit_role_granted(env: &Env, account: &Address, role: u32) {
     // Use Soroban's diagnostic event system for off-chain monitoring
     // Event topics: ["role_granted", account, role_value]
@@ -391,6 +392,7 @@ fn emit_role_granted(env: &Env, account: &Address, role: u32) {
 
 /// Emit an event when a role is revoked.
 /// SECURITY: Provides audit trail even for non-existent role revocations
+#[allow(dead_code)]
 fn emit_role_revoked(env: &Env, account: &Address, role: u32) {
     soroban_sdk::log!(env, "role_revoked: account={:?}, role={}", account, role);
 }

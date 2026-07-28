@@ -961,7 +961,7 @@ fn test_epoch_snapshot_persisted_on_config_change() {
     assert_eq!(client.get_fee_quote_at_epoch(&0), 500);
     let snapshot0 = client.get_fee_config_at_epoch(&0).unwrap();
     assert_eq!(snapshot0.amount, 500);
-    assert_eq!(snapshot0.enabled, true);
+    assert!(snapshot0.enabled);
 
     // Update config in current epoch 0 to 1_200.
     client.configure_flat_fee(&token_addr, &collector, &1_200, &true);
@@ -1062,7 +1062,7 @@ fn test_epoch_snapshot_toggling_enabled_disabled() {
     assert_eq!(client.get_fee_quote_at_epoch(&2), 900);
 
     let snapshot1 = client.get_fee_config_at_epoch(&1).unwrap();
-    assert_eq!(snapshot1.enabled, false);
+    assert!(!snapshot1.enabled);
 }
 
 /// Snapshots beyond MAX_EPOCH_HISTORY retention limit are pruned to cap storage growth.

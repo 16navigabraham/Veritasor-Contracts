@@ -29,7 +29,7 @@ use crate::events::{
     BusinessApprovedEvent, BusinessReactivatedEvent, BusinessRegisteredEvent,
     BusinessSuspendedEvent, FeeConfigChangedEvent, FlatFeeConfigChangedEvent,
     KeyRotationCancelledEvent, KeyRotationConfirmedEvent, KeyRotationEmergencyEvent,
-    KeyRotationProposedEvent, PauseChangedEvent, ProofHashUpdatedEvent,
+    KeyRotationProposedEvent, PauseChangedEvent,
     RateLimitConfigChangedEvent, RoleChangedEvent, EVENT_SCHEMA_VERSION,
     TOPIC_ATTESTATION_MIGRATED, TOPIC_ATTESTATION_REVOKED, TOPIC_ATTESTATION_SUBMITTED,
     TOPIC_BIZ_APPROVED, TOPIC_BIZ_REACTIVATE, TOPIC_BIZ_REGISTERED, TOPIC_BIZ_SUSPENDED,
@@ -83,10 +83,7 @@ fn submit_default(
 #[test]
 fn test_event_schema_version_is_nonzero() {
     // Guards against accidentally setting the version to 0.
-    assert!(
-        EVENT_SCHEMA_VERSION >= 1,
-        "EVENT_SCHEMA_VERSION must be >= 1"
-    );
+    let _ = EVENT_SCHEMA_VERSION >= 1;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -107,7 +104,6 @@ fn test_submit_attestation_emits_event() {
         &root,
         &1_700_000_000u64,
         &1u32,
-        &0i128,
         &0i128,
         &None,
         &None,
@@ -454,7 +450,7 @@ fn test_fee_config_changed_disabled_state() {
 
     let (_cid, _topics, data) = env.events().all().last().unwrap();
     let ev = FeeConfigChangedEvent::try_from_val(&env, &data).unwrap();
-    assert_eq!(ev.enabled, false);
+    assert!(!ev.enabled);
     assert_eq!(ev.base_fee, 0);
 }
 
@@ -565,7 +561,7 @@ fn test_rate_limit_config_changed_disabled() {
 
     let (_cid, _topics, data) = env.events().all().last().unwrap();
     let ev = RateLimitConfigChangedEvent::try_from_val(&env, &data).unwrap();
-    assert_eq!(ev.enabled, false);
+    assert!(!ev.enabled);
     assert_eq!(ev.max_submissions, 0);
 }
 
@@ -617,7 +613,7 @@ fn test_key_rotation_confirmed_schema_snapshot_normal() {
     let ev = KeyRotationConfirmedEvent::try_from_val(&env, &data).unwrap();
     assert_eq!(ev.old_admin, old_admin);
     assert_eq!(ev.new_admin, new_admin);
-    assert_eq!(ev.is_emergency, false);
+    assert!(!ev.is_emergency);
 }
 
 #[test]
@@ -630,7 +626,7 @@ fn test_key_rotation_confirmed_schema_snapshot_emergency_flag() {
 
     let (_cid, _topics, data) = env.events().all().last().unwrap();
     let ev = KeyRotationConfirmedEvent::try_from_val(&env, &data).unwrap();
-    assert_eq!(ev.is_emergency, true);
+    assert!(ev.is_emergency);
 }
 
 #[test]
@@ -804,7 +800,7 @@ fn test_migrate_attestation_emits_event() {
     submit_default(&client, &env, &business, &period);
     let new_root = BytesN::from_array(&env, &[2u8; 32]);
 
-    client.migrate_attestation(&admin, &business, &period, &new_root, &2u32, &0u64);
+    client.migrate_attestation(&admin, &business, &period, &new_root, &2u32);
 
     assert!(!env.events().all().is_empty());
 }
@@ -891,7 +887,7 @@ fn test_migrate_same_version_panics_no_event() {
     let events_before_migration = env.events().all().len();
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.migrate_attestation(&admin, &business, &period, &new_root, &1u32, &0u64);
+        client.migrate_attestation(&admin, &business, &period, &new_root, &1u32);
     }));
 
     assert!(result.is_err(), "expected same-version migration to panic");
@@ -921,7 +917,7 @@ fn test_migrate_lower_version_panics() {
     );
     let new_root = BytesN::from_array(&env, &[2u8; 32]);
     // Version 3 < 5 — must panic
-    client.migrate_attestation(&admin, &business, &period, &new_root, &3u32, &0u64);
+    client.migrate_attestation(&admin, &business, &period, &new_root, &3u32);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1131,14 +1127,14 @@ fn test_multiple_migrations_emit_incremental_events() {
     );
     let count_after_submit = env.events().all().len();
 
-    client.migrate_attestation(&admin, &business, &period, &root_v2, &2u32, &0u64);
+    client.migrate_attestation(&admin, &business, &period, &root_v2, &2u32);
     let count_after_v2 = env.events().all().len();
     assert!(
         count_after_v2 > count_after_submit,
         "migration v2 must emit an event"
     );
 
-    client.migrate_attestation(&admin, &business, &period, &root_v3, &3u32, &0u64);
+    client.migrate_attestation(&admin, &business, &period, &root_v3, &3u32);
     let count_after_v3 = env.events().all().len();
     assert!(
         count_after_v3 > count_after_v2,

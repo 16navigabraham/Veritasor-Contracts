@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 // Tests rely on `std` (e.g. `std::format!`, `std::vec!`); pull it in only when
 // building the test harness so the contract crate remains `no_std`.
@@ -7,7 +8,7 @@ extern crate std;
 
 use core::cmp::Ordering;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, TryIntoVal, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 use veritasor_common::replay_protection;
@@ -902,7 +903,7 @@ impl AttestationContract {
 
         // Populate reverse index: merkle_root -> range position for O(1) revocation lookup
         let index_key = MultiPeriodKey::RootIndex(business.clone(), merkle_root.clone());
-        let range_index = (ranges.len() - 1);
+        let range_index = ranges.len() - 1;
         env.storage().instance().set(&index_key, &range_index);
 
         events::emit_multi_period_issued(&env, &business, start_period, end_period, &merkle_root);
@@ -1606,6 +1607,7 @@ impl AttestationContract {
     }
 
     /// REQUIREMENT: Rejects empty or malformed strings to avoid permanent unvalidated storage poisoning.
+    #[allow(dead_code)]
     fn validate_period(period: &String) {
         if period.is_empty() {
             panic!("period string must not be empty");
