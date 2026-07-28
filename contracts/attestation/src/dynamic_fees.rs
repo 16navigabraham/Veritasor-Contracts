@@ -117,13 +117,33 @@ pub enum DataKey {
     SubmissionTimestamps(Address),
     IsPaused,
 
-    // ── Epoch checkpointing ────────────────────────────────────
-    /// Cumulative submission count for a given period (epoch).
-    /// Keyed by period string (e.g. `"2026-02"`).
-    EpochSubmissions(soroban_sdk::String),
-    /// Cumulative fees collected for a given period (epoch).
-    /// Keyed by period string.
-    EpochFeesCollected(soroban_sdk::String),
+    // ── Archival tier ──────────────────────────────────────────
+    /// Full attestation data moved to archive tier, keyed by (business, period).
+    /// Original `Attestation` key is removed after archival.
+    ArchivedAttestation(Address, soroban_sdk::String),
+    /// Lightweight pointer left in active tier after archival, keyed by (business, period).
+    /// Contains the commitment root and a sequential archive index for discoverability.
+    ArchivePointer(Address, soroban_sdk::String),
+    /// Monotonically increasing global archive index counter (u64).
+    /// Incremented once per archived attestation to provide a stable ordinal.
+    ArchiveIndex,
+}
+
+/// Lightweight pointer preserved in the active tier after an attestation is moved
+/// to the archive tier.
+///
+/// Allows callers to discover that an attestation existed and was archived, and to
+/// retrieve the commitment root without loading the full archived record.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchivePointerRecord {
+    /// The Merkle commitment root from the original attestation (32 bytes).
+    pub merkle_root: soroban_sdk::BytesN<32>,
+    /// Sequential archive index assigned at the time of archival.
+    /// Monotonically increasing across all archived attestations in this contract.
+    pub archive_index: u64,
+    /// Ledger timestamp when the attestation was moved to archive.
+    pub archived_at: u64,
 }
 
 /// On-chain fee configuration.
@@ -417,51 +437,68 @@ pub fn collect_fee_from(env: &Env, payer: &Address, business: &Address) -> i128 
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  Epoch accumulator helpers
-//
-//  Per-period (epoch) counters that power the EpochCheckpoint event.
-//  Stored in instance storage so they persist across ledger boundaries
-//  and share the contract's TTL budget.
-//
-//  Saturating arithmetic is used throughout: counters can only grow,
-//  preventing overflow-based manipulation that could reset a total and
-//  mislead third-party replayers.
+//  Archive tier helpers
 // ════════════════════════════════════════════════════════════════════
 
-/// Return the cumulative submission count for `period`.  Returns `0` if the
-/// period has never received a submission.
-pub fn get_epoch_submissions(env: &Env, period: &soroban_sdk::String) -> u64 {
+/// Read the current global archive index (0 if never set).
+pub fn get_archive_index(env: &Env) -> u64 {
     env.storage()
         .instance()
-        .get(&DataKey::EpochSubmissions(period.clone()))
+        .get(&DataKey::ArchiveIndex)
         .unwrap_or(0u64)
 }
 
-/// Increment the submission count for `period` by `delta` and persist it.
-/// Returns the updated total.
-pub fn increment_epoch_submissions(env: &Env, period: &soroban_sdk::String, delta: u64) -> u64 {
-    let next = get_epoch_submissions(env, period).saturating_add(delta);
+/// Increment the global archive index and return the *new* value.
+pub fn next_archive_index(env: &Env) -> u64 {
+    let next = get_archive_index(env) + 1;
     env.storage()
         .instance()
-        .set(&DataKey::EpochSubmissions(period.clone()), &next);
+        .set(&DataKey::ArchiveIndex, &next);
     next
 }
 
-/// Return the cumulative fees collected for `period`.  Returns `0` if the
-/// period has never received a submission.
-pub fn get_epoch_fees_collected(env: &Env, period: &soroban_sdk::String) -> i128 {
+/// Store a full attestation in the archive tier.
+pub fn set_archived_attestation(
+    env: &Env,
+    business: &Address,
+    period: &soroban_sdk::String,
+    data: &crate::AttestationData,
+) {
     env.storage()
         .instance()
-        .get(&DataKey::EpochFeesCollected(period.clone()))
-        .unwrap_or(0i128)
+        .set(&DataKey::ArchivedAttestation(business.clone(), period.clone()), data);
 }
 
-/// Add `amount` to the cumulative fee total for `period` and persist it.
-/// Returns the updated total.
-pub fn accumulate_epoch_fees(env: &Env, period: &soroban_sdk::String, amount: i128) -> i128 {
-    let next = get_epoch_fees_collected(env, period).saturating_add(amount);
+/// Read a full attestation from the archive tier.
+pub fn get_archived_attestation(
+    env: &Env,
+    business: &Address,
+    period: &soroban_sdk::String,
+) -> Option<crate::AttestationData> {
     env.storage()
         .instance()
-        .set(&DataKey::EpochFeesCollected(period.clone()), &next);
-    next
+        .get(&DataKey::ArchivedAttestation(business.clone(), period.clone()))
+}
+
+/// Write the lightweight archive pointer for a (business, period).
+pub fn set_archive_pointer(
+    env: &Env,
+    business: &Address,
+    period: &soroban_sdk::String,
+    pointer: &ArchivePointerRecord,
+) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ArchivePointer(business.clone(), period.clone()), pointer);
+}
+
+/// Read the lightweight archive pointer for a (business, period).
+pub fn get_archive_pointer(
+    env: &Env,
+    business: &Address,
+    period: &soroban_sdk::String,
+) -> Option<ArchivePointerRecord> {
+    env.storage()
+        .instance()
+        .get(&DataKey::ArchivePointer(business.clone(), period.clone()))
 }
