@@ -45,7 +45,8 @@
 //!   stale authorisations from being replayed.
 //! - Only the admin who called `restore_dry_run` can call `restore_commit`.
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
 
 /// Maximum UTF-8 byte length for period/epoch identifiers.
 pub const MAX_PERIOD_BYTES: u32 = 128;
@@ -87,6 +88,9 @@ mod attestation_import {
     pub use veritasor_attestation::AttestationContractClient;
 }
 
+#[cfg(test)]
+mod test;
+
 // ════════════════════════════════════════════════════════════════════
 //  Storage types
 // ════════════════════════════════════════════════════════════════════
@@ -106,7 +110,9 @@ pub enum DataKey {
     EpochBusinesses(String),
     /// Immutable metadata once an epoch has been finalized.
     EpochFinalization(String),
-    /// Authorized snapshot writer.
+    /// Ordered list of all epoch identifiers ever recorded (for commitment iteration).
+    AllEpochs,
+    /// Authorized snapshot writer (can record without being admin).
     Writer(Address),
     /// Pending restore token for a given admin (set by dry-run, consumed by commit).
     PendingRestore(Address),
@@ -306,6 +312,7 @@ impl AttestationSnapshotContract {
             .set(&DataKey::Snapshot(business.clone(), period.clone()), &record);
         Self::index_period_for_business(&env, &business, &period);
         Self::index_business_for_epoch(&env, &period, &business);
+        Self::index_epoch_globally(&env, &period);
     }
 
     /// Finalize an epoch — irreversible, freezes all future writes for that epoch.
@@ -601,6 +608,94 @@ impl AttestationSnapshotContract {
     pub fn get_max_business_periods(_env: Env) -> u32 { MAX_BUSINESS_PERIODS }
     pub fn get_max_epoch_businesses(_env: Env) -> u32 { MAX_EPOCH_BUSINESSES }
 
+    // ── Snapshot commitment ───────────────────────────────────────────
+
+    /// Return all epoch identifiers recorded on this contract, in insertion order.
+    ///
+    /// Supports pagination via `page` (0-indexed) and `page_size`.
+    /// Pass `page_size = 0` to return all entries in a single page.
+    pub fn get_all_epochs(env: Env, page: u32, page_size: u32) -> Vec<String> {
+        let all: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllEpochs)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if page_size == 0 {
+            return all;
+        }
+
+        let start: u32 = page * page_size;
+        let mut result = Vec::new(&env);
+        let mut i = start;
+        while i < all.len() && (i - start) < page_size {
+            result.push_back(all.get(i).unwrap());
+            i += 1;
+        }
+        result
+    }
+
+    /// Total number of unique epoch identifiers tracked.
+    pub fn get_total_epoch_count(env: Env) -> u32 {
+        let all: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllEpochs)
+            .unwrap_or_else(|| Vec::new(&env));
+        all.len()
+    }
+
+    /// Export a deterministic commitment over all snapshot data stored in this
+    /// contract. An auditor can independently page through all data, recompute the
+    /// same hash, and verify integrity: trust nothing beyond published wasm and
+    /// public RPC.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Iterate all known epochs in insertion order.
+    /// 2. For each epoch, iterate its businesses in insertion order.
+    /// 3. For each business, iterate its snapshot records in period order.
+    /// 4. Serialize the flat `Vec<SnapshotRecord>` to XDR.
+    /// 5. Return `sha256(xdr_bytes)`.
+    ///
+    /// An empty contract returns the SHA-256 of the empty XDR vector.
+    pub fn export_snapshot_commitment(env: Env) -> BytesN<32> {
+        let all_epochs: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllEpochs)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut records = Vec::new(&env);
+
+        for i in 0..all_epochs.len() {
+            let epoch = all_epochs.get(i).unwrap();
+            let businesses: Vec<Address> = Self::read_epoch_businesses(&env, &epoch);
+
+            for j in 0..businesses.len() {
+                let business = businesses.get(j).unwrap();
+                let periods_key = DataKey::BusinessPeriods(business.clone());
+                let periods: Vec<String> = env
+                    .storage()
+                    .instance()
+                    .get(&periods_key)
+                    .unwrap_or_else(|| Vec::new(&env));
+
+                for k in 0..periods.len() {
+                    let period = periods.get(k).unwrap();
+                    let snap_key = DataKey::Snapshot(business.clone(), period.clone());
+                    if let Some(record) = env.storage().instance().get::<_, SnapshotRecord>(&snap_key)
+                    {
+                        records.push_back(record);
+                    }
+                }
+            }
+        }
+
+        let encoded = records.to_xdr(&env);
+        env.crypto().sha256(&encoded).into()
+    }
+
     // ── Internal ────────────────────────────────────────────────────
 
     fn require_admin(env: &Env, caller: &Address) {
@@ -679,36 +774,22 @@ impl AttestationSnapshotContract {
         assert!(period.len() <= MAX_PERIOD_BYTES, "period exceeds max bytes");
     }
 
-    /// Compute a deterministic fingerprint for a restore batch.
-    ///
-    /// Concatenates for each entry: the XDR bytes of the business address
-    /// followed by the UTF-8 bytes of the period string, then SHA-256 hashes
-    /// the whole buffer.  This uniquely identifies the set and order of
-    /// (business, period) pairs without hashing arbitrary user-supplied data.
-    fn compute_batch_hash(env: &Env, entries: &Vec<RestoreEntry>) -> soroban_sdk::BytesN<32> {
-        let mut buf = soroban_sdk::Bytes::new(env);
-        for i in 0..entries.len() {
-            let entry = entries.get(i).unwrap();
-            // Append address bytes (contract address is 32 bytes in Stellar).
-            let addr_bytes = entry.business.to_string().into_bytes();
-            buf.append(&addr_bytes);
-            // Append period bytes.
-            buf.append(&entry.period.into_bytes());
-            // Append recorded_at as 8 big-endian bytes for ordering sensitivity.
-            let ts = entry.record.recorded_at;
-            let ts_bytes: [u8; 8] = [
-                ((ts >> 56) & 0xff) as u8,
-                ((ts >> 48) & 0xff) as u8,
-                ((ts >> 40) & 0xff) as u8,
-                ((ts >> 32) & 0xff) as u8,
-                ((ts >> 24) & 0xff) as u8,
-                ((ts >> 16) & 0xff) as u8,
-                ((ts >> 8)  & 0xff) as u8,
-                ( ts        & 0xff) as u8,
-            ];
-            buf.append(&soroban_sdk::Bytes::from_array(env, &ts_bytes));
+    fn index_epoch_globally(env: &Env, epoch: &String) {
+        let key = DataKey::AllEpochs;
+        let mut epochs: Vec<String> = env
+            .storage()
+            .instance()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        for i in 0..epochs.len() {
+            if epochs.get(i).unwrap() == *epoch {
+                return;
+            }
         }
-        env.crypto().sha256(&buf)
+
+        epochs.push_back(epoch.clone());
+        env.storage().instance().set(&key, &epochs);
     }
 }
 
