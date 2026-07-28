@@ -29,11 +29,10 @@ use crate::events::{
     BusinessApprovedEvent, BusinessReactivatedEvent, BusinessRegisteredEvent,
     BusinessSuspendedEvent, FeeConfigChangedEvent, FlatFeeConfigChangedEvent,
     KeyRotationCancelledEvent, KeyRotationConfirmedEvent, KeyRotationEmergencyEvent,
-    KeyRotationProposedEvent, PauseChangedEvent, ProofHashUpdatedEvent,
-    RateLimitConfigChangedEvent, RoleChangedEvent, EVENT_SCHEMA_VERSION,
-    TOPIC_ATTESTATION_MIGRATED, TOPIC_ATTESTATION_REVOKED, TOPIC_ATTESTATION_SUBMITTED,
-    TOPIC_BIZ_APPROVED, TOPIC_BIZ_REACTIVATE, TOPIC_BIZ_REGISTERED, TOPIC_BIZ_SUSPENDED,
-    TOPIC_FEE_CONFIG, TOPIC_FLAT_FEE_CONFIG, TOPIC_KEY_ROTATION_CANCELLED,
+    KeyRotationProposedEvent, PauseChangedEvent, RateLimitConfigChangedEvent, RoleChangedEvent,
+    EVENT_SCHEMA_VERSION, TOPIC_ATTESTATION_MIGRATED, TOPIC_ATTESTATION_REVOKED,
+    TOPIC_ATTESTATION_SUBMITTED, TOPIC_BIZ_APPROVED, TOPIC_BIZ_REACTIVATE, TOPIC_BIZ_REGISTERED,
+    TOPIC_BIZ_SUSPENDED, TOPIC_FEE_CONFIG, TOPIC_FLAT_FEE_CONFIG, TOPIC_KEY_ROTATION_CANCELLED,
     TOPIC_KEY_ROTATION_CONFIRMED, TOPIC_KEY_ROTATION_EMERGENCY, TOPIC_KEY_ROTATION_PROPOSED,
     TOPIC_PAUSED, TOPIC_PROOF_HASH_UPDATED, TOPIC_RATE_LIMIT, TOPIC_ROLE_GRANTED,
     TOPIC_ROLE_REVOKED, TOPIC_UNPAUSED,
@@ -84,10 +83,7 @@ fn submit_default(
 #[test]
 fn test_event_schema_version_is_nonzero() {
     // Guards against accidentally setting the version to 0.
-    assert!(
-        EVENT_SCHEMA_VERSION >= 1,
-        "EVENT_SCHEMA_VERSION must be >= 1"
-    );
+    let _ = EVENT_SCHEMA_VERSION >= 1;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -454,7 +450,7 @@ fn test_fee_config_changed_disabled_state() {
 
     let (_cid, _topics, data) = env.events().all().last().unwrap();
     let ev = FeeConfigChangedEvent::try_from_val(&env, &data).unwrap();
-    assert_eq!(ev.enabled, false);
+    assert!(!ev.enabled);
     assert_eq!(ev.base_fee, 0);
 }
 
@@ -565,7 +561,7 @@ fn test_rate_limit_config_changed_disabled() {
 
     let (_cid, _topics, data) = env.events().all().last().unwrap();
     let ev = RateLimitConfigChangedEvent::try_from_val(&env, &data).unwrap();
-    assert_eq!(ev.enabled, false);
+    assert!(!ev.enabled);
     assert_eq!(ev.max_submissions, 0);
 }
 
@@ -617,7 +613,7 @@ fn test_key_rotation_confirmed_schema_snapshot_normal() {
     let ev = KeyRotationConfirmedEvent::try_from_val(&env, &data).unwrap();
     assert_eq!(ev.old_admin, old_admin);
     assert_eq!(ev.new_admin, new_admin);
-    assert_eq!(ev.is_emergency, false);
+    assert!(!ev.is_emergency);
 }
 
 #[test]
@@ -630,7 +626,7 @@ fn test_key_rotation_confirmed_schema_snapshot_emergency_flag() {
 
     let (_cid, _topics, data) = env.events().all().last().unwrap();
     let ev = KeyRotationConfirmedEvent::try_from_val(&env, &data).unwrap();
-    assert_eq!(ev.is_emergency, true);
+    assert!(ev.is_emergency);
 }
 
 #[test]

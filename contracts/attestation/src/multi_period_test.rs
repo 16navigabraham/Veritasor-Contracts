@@ -10,10 +10,6 @@ use super::*;
 use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, BytesN, Env, Vec};
-// Alias for std Vec — avoids ambiguity with the `soroban_sdk::Vec` import above.
-use std::vec::Vec as StdVec;
-// `format!` macro needed by proptest's `prop_assert!` / `prop_assert_eq!` inside no_std.
-use std::format;
 
 // ════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -40,11 +36,10 @@ fn period_to_root(period: u32) -> [u8; 32] {
 }
 
 /// Read the stored multi-period ranges for `business` directly from storage.
-fn get_ranges(env: &Env, contract_id: &Address, business: &Address) -> Vec<AttestationRange> {
-    env.as_contract(contract_id, || {
-        let key = MultiPeriodKey::Ranges(business.clone());
-        env.storage().instance().get(&key).unwrap_or(Vec::new(env))
-    })
+#[allow(dead_code)]
+fn get_ranges(env: &Env, business: &Address) -> Vec<AttestationRange> {
+    let key = MultiPeriodKey::Ranges(business.clone());
+    env.storage().instance().get(&key).unwrap_or(Vec::new(env))
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -79,7 +74,7 @@ fn test_revocation_via_index_success() {
     client.revoke_multi_period_attestation(&business, &root);
 
     // Verify revoked flag set
-    let stored = get_ranges(&env, &contract_id, &business);
+    let stored = client.get_multi_period_ranges(&business);
     assert!(stored.get(0).unwrap().revoked);
 }
 
@@ -116,7 +111,7 @@ fn test_multiple_ranges_independent_index() {
     // Revoke the middle one via index
     client.revoke_multi_period_attestation(&business, &root2);
 
-    let stored = get_ranges(&env, &contract_id, &business);
+    let stored = client.get_multi_period_ranges(&business);
     assert!(!stored.get(0).unwrap().revoked); // First not revoked
     assert!(stored.get(1).unwrap().revoked); // Middle revoked
     assert!(!stored.get(2).unwrap().revoked); // Last not revoked
@@ -139,7 +134,7 @@ fn test_revocation_last_range_via_index() {
     // Revoke the last (most recent) range
     client.revoke_multi_period_attestation(&business, &root2);
 
-    let stored = get_ranges(&env, &contract_id, &business);
+    let stored = client.get_multi_period_ranges(&business);
     assert!(stored.get(1).unwrap().revoked);
 }
 
@@ -300,7 +295,7 @@ fn test_overlap_with_revoked_range_succeeds() {
         &business, &202401, &202412, &root2, &2000u64, &1u32, &None, &None,
     );
 
-    let stored = get_ranges(&env, &contract_id, &business);
+    let stored = client.get_multi_period_ranges(&business);
     assert!(stored.get(0).unwrap().revoked);
     assert!(!stored.get(1).unwrap().revoked);
 }

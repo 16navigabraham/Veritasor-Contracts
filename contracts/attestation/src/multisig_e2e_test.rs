@@ -4,8 +4,6 @@
 //! `EmergencyRotateAdmin` against the live `AttestationContract`, including
 //! threshold enforcement, expiry, and approval-set edge cases.
 
-#![cfg(test)]
-
 extern crate std;
 
 use super::*;

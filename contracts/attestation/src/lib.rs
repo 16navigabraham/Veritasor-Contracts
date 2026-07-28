@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 // Tests rely on `std` (e.g. `std::format!`, `std::vec!`); pull it in only when
 // building the test harness so the contract crate remains `no_std`.
@@ -7,7 +8,7 @@ extern crate std;
 
 use core::cmp::Ordering;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, TryIntoVal, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 use veritasor_common::replay_protection;
@@ -931,7 +932,7 @@ impl AttestationContract {
 
         // Populate reverse index: merkle_root -> range position for O(1) revocation lookup
         let index_key = MultiPeriodKey::RootIndex(business.clone(), merkle_root.clone());
-        let range_index = (ranges.len() - 1);
+        let range_index = ranges.len() - 1;
         env.storage().instance().set(&index_key, &range_index);
 
         events::emit_multi_period_issued(&env, &business, start_period, end_period, &merkle_root);
@@ -1193,6 +1194,35 @@ impl AttestationContract {
     /// Returns the effective flat fee config (DAO override takes precedence).
     pub fn get_effective_flat_fee_config(env: Env) -> Option<FlatFeeConfig> {
         fees::get_effective_flat_fee_config(&env)
+    }
+
+    /// Returns the current epoch number.
+    pub fn get_current_epoch(env: Env) -> u64 {
+        fees::get_current_epoch(&env)
+    }
+
+    /// Admin: Advance to the next epoch and persist snapshot for the new epoch.
+    pub fn advance_epoch(env: Env) -> u64 {
+        dynamic_fees::require_admin(&env);
+        fees::advance_epoch(&env)
+    }
+
+    /// Admin: Set current epoch number and persist snapshot for that epoch.
+    pub fn set_current_epoch(env: Env, epoch: u64) {
+        dynamic_fees::require_admin(&env);
+        fees::set_current_epoch(&env, epoch);
+    }
+
+    /// Returns the effective flat fee config snapshot for a historical epoch.
+    pub fn get_fee_config_at_epoch(env: Env, epoch: u64) -> Option<FlatFeeConfig> {
+        fees::get_fee_config_at_epoch(&env, epoch)
+    }
+
+    /// Returns the historical fee quote at a specific epoch.
+    /// Solves fee-drift for auditors by returning the fee that applied at that epoch.
+    /// Returns 0 if fees were disabled/unconfigured or if epoch is uninitialized/pruned.
+    pub fn get_fee_quote_at_epoch(env: Env, epoch: u64) -> i128 {
+        fees::get_fee_quote_at_epoch(&env, epoch)
     }
 
     pub fn get_fee_quote(env: Env, business: Address) -> i128 {
@@ -1626,6 +1656,7 @@ impl AttestationContract {
     }
 
     /// REQUIREMENT: Rejects empty or malformed strings to avoid permanent unvalidated storage poisoning.
+    #[allow(dead_code)]
     fn validate_period(period: &String) {
         if period.is_empty() {
             panic!("period string must not be empty");

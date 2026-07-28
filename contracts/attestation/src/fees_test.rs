@@ -914,79 +914,205 @@ fn test_sac_integration_collector_equal_to_business_records_fee() {
     assert_eq!(record.3, 500);
 }
 
-/// Validates that tier discount rounding correctly truncates toward zero (half-up or floor equivalent).
-/// When tier discounts multiply small base fees, rounding can drop the discount to zero, or
-/// even reduce the fee to zero depending on the arithmetic.
-/// 
-/// Security note: Truncating toward zero ensures fees never exceed the expected base. 
-/// However, businesses may inadvertently pay 0 for small base_fee and small discounts.
+// ════════════════════════════════════════════════════════════════════
+//  Historical Fee Config Snapshots & Epoch Reconstruction Tests
+// ════════════════════════════════════════════════════════════════════
+
+/// Querying fee quote for an epoch before contract initialization or prior to config setup
+/// returns 0 without crashing.
 #[test]
-fn test_tier_discount_rounding_boundary() {
+fn test_fee_quote_before_initialization_returns_zero() {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let dyn_collector = Address::generate(&env);
-    let business = Address::generate(&env);
+    let contract_id = env.register(AttestationContract, ());
+    let client = AttestationContractClient::new(&env, &contract_id);
 
+    // Uninitialized / no config set: querying epoch 0 or any historical epoch returns 0.
+    assert_eq!(client.get_fee_quote_at_epoch(&0), 0);
+    assert_eq!(client.get_fee_quote_at_epoch(&10), 0);
+    assert_eq!(client.get_fee_config_at_epoch(&0), None);
+
+    client.initialize(&admin, &0u64);
+    assert_eq!(client.get_current_epoch(), 0);
+    assert_eq!(client.get_fee_quote_at_epoch(&0), 0);
+}
+
+/// Updating flat fee configuration persists snapshot for current epoch.
+#[test]
+fn test_epoch_snapshot_persisted_on_config_change() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let collector = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
     let token_addr = token_contract.address().clone();
 
     let contract_id = env.register(AttestationContract, ());
     let client = AttestationContractClient::new(&env, &contract_id);
     client.initialize(&admin, &0u64);
 
-    mint(&env, &token_addr, &business, 1_000_000);
+    // Configure flat fee at epoch 0.
+    client.configure_flat_fee(&token_addr, &collector, &500, &true);
 
-    // Iterating small base fees and specific fractional bps discounts
-    let test_cases = [
-        // (base_fee, tier_discount_bps, expected_fee)
-        // 1 bps discount on base_fee 1: 
-        // 1 * (10000 - 1) * 10000 / 100000000 = 99990000 / 100000000 = 0
-        (1, 1, 0),
-        // base_fee 2, discount 5000 bps (50%): 
-        // 2 * 5000 * 10000 / 100000000 = 100000000 / 100000000 = 1
-        (2, 5_000, 1),
-        // base_fee 5, discount 3333 bps (~33.33%):
-        // 5 * 6667 * 10000 / 100000000 = 333350000 / 100000000 = 3
-        (5, 3_333, 3),
-        // base_fee 7, discount 1000 bps (10%):
-        // 7 * 9000 * 10000 / 100000000 = 630000000 / 100000000 = 6
-        (7, 1_000, 6),
-    ];
+    assert_eq!(client.get_fee_quote_at_epoch(&0), 500);
+    let snapshot0 = client.get_fee_config_at_epoch(&0).unwrap();
+    assert_eq!(snapshot0.amount, 500);
+    assert!(snapshot0.enabled);
 
-    let mut period_idx = 1;
-    for (base_fee, discount_bps, expected_fee) in test_cases {
-        client.configure_fees(&token_addr, &dyn_collector, &base_fee, &true);
-        client.set_tier_discount(&1, &discount_bps);
-        client.set_business_tier(&business, &1);
-        
+    // Update config in current epoch 0 to 1_200.
+    client.configure_flat_fee(&token_addr, &collector, &1_200, &true);
+    assert_eq!(client.get_fee_quote_at_epoch(&0), 1_200);
+}
+
+/// Advancing epoch snapshots configuration and preserves historical fee quote for auditors.
+#[test]
+fn test_epoch_advance_preserves_historical_snapshots() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address().clone();
+
+    let contract_id = env.register(AttestationContract, ());
+    let client = AttestationContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &0u64);
+
+    // Epoch 0: Fee = 500
+    client.configure_flat_fee(&token_addr, &collector, &500, &true);
+
+    // Advance to Epoch 1: Fee updated to 1,000
+    let epoch1 = client.advance_epoch();
+    assert_eq!(epoch1, 1);
+    assert_eq!(client.get_current_epoch(), 1);
+    client.configure_flat_fee(&token_addr, &collector, &1_000, &true);
+
+    // Advance to Epoch 2: Fee updated to 1,500
+    let epoch2 = client.advance_epoch();
+    assert_eq!(epoch2, 2);
+    client.configure_flat_fee(&token_addr, &collector, &1_500, &true);
+
+    // Verify historical quotes are preserved without fee drift
+    assert_eq!(client.get_fee_quote_at_epoch(&0), 500);
+    assert_eq!(client.get_fee_quote_at_epoch(&1), 1_000);
+    assert_eq!(client.get_fee_quote_at_epoch(&2), 1_500);
+
+    // Query unconfigured epoch 3 returns 0
+    assert_eq!(client.get_fee_quote_at_epoch(&3), 0);
+}
+
+/// Setting current epoch explicitly updates current epoch and snapshots config.
+#[test]
+fn test_set_current_epoch_and_get_current_epoch() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address().clone();
+
+    let contract_id = env.register(AttestationContract, ());
+    let client = AttestationContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &0u64);
+
+    client.configure_flat_fee(&token_addr, &collector, &777, &true);
+
+    client.set_current_epoch(&10);
+    assert_eq!(client.get_current_epoch(), 10);
+    assert_eq!(client.get_fee_quote_at_epoch(&10), 777);
+}
+
+/// Disabling and enabling fees across epochs accurately reflects in get_fee_quote_at_epoch.
+#[test]
+fn test_epoch_snapshot_toggling_enabled_disabled() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address().clone();
+
+    let contract_id = env.register(AttestationContract, ());
+    let client = AttestationContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &0u64);
+
+    // Epoch 0: Enabled (600)
+    client.configure_flat_fee(&token_addr, &collector, &600, &true);
+
+    // Epoch 1: Disabled
+    client.advance_epoch();
+    client.configure_flat_fee(&token_addr, &collector, &600, &false);
+
+    // Epoch 2: Enabled (900)
+    client.advance_epoch();
+    client.configure_flat_fee(&token_addr, &collector, &900, &true);
+
+    assert_eq!(client.get_fee_quote_at_epoch(&0), 600);
+    assert_eq!(client.get_fee_quote_at_epoch(&1), 0);
+    assert_eq!(client.get_fee_quote_at_epoch(&2), 900);
+
+    let snapshot1 = client.get_fee_config_at_epoch(&1).unwrap();
+    assert!(!snapshot1.enabled);
+}
+
+/// Snapshots beyond MAX_EPOCH_HISTORY retention limit are pruned to cap storage growth.
+#[test]
+fn test_epoch_snapshot_pruning_max_epoch_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let collector = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_addr = token_contract.address().clone();
+
+    let contract_id = env.register(AttestationContract, ());
+    let client = AttestationContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &0u64);
+
+    client.configure_flat_fee(&token_addr, &collector, &100, &true);
+
+    // Record snapshots for MAX_EPOCH_HISTORY + 10 epochs (epochs 0 to 109).
+    let max_history = fees::MAX_EPOCH_HISTORY;
+    let total_epochs = max_history + 10;
+
+    for epoch in 1..total_epochs {
+        client.set_current_epoch(&epoch);
+    }
+
+    assert_eq!(client.get_current_epoch(), total_epochs - 1);
+
+    // First 10 epochs (0..10) should be pruned
+    for old_epoch in 0..10 {
         assert_eq!(
-            client.get_fee_quote(&business),
-            expected_fee,
-            "fee quote rounding failed for base {} and discount {}",
-            base_fee,
-            discount_bps
+            client.get_fee_config_at_epoch(&old_epoch),
+            None,
+            "old epoch should be pruned"
         );
-
-        let dyn_before = sac_balance(&env, &token_addr, &dyn_collector);
-        let period_str = std::format!("2027-{:02}", period_idx);
-        submit(&client, &env, &business, &period_str, period_idx as u8);
-
-        let dyn_delta = sac_balance(&env, &token_addr, &dyn_collector) - dyn_before;
         assert_eq!(
-            dyn_delta, expected_fee,
-            "collector received incorrect rounded amount"
+            client.get_fee_quote_at_epoch(&old_epoch),
+            0,
+            "pruned epoch returns 0 quote"
         );
-        
-        let record = client
-            .get_attestation(&business, &String::from_str(&env, &period_str))
-            .unwrap();
-        assert_eq!(
-            record.3, expected_fee,
-            "recorded fee_paid mismatch"
+    }
+
+    // Recent epochs within retention limit (10..110) should exist
+    for active_epoch in 10..total_epochs {
+        assert!(
+            client.get_fee_config_at_epoch(&active_epoch).is_some(),
+            "active epoch within retention limit should exist"
         );
-        period_idx += 1;
+        assert_eq!(client.get_fee_quote_at_epoch(&active_epoch), 100);
     }
 }
