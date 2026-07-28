@@ -58,7 +58,7 @@ pub use access_control::{ROLE_ADMIN, ROLE_ATTESTOR, ROLE_BUSINESS, ROLE_OPERATOR
 pub use dispute::{
     Dispute, DisputeOutcome, DisputeResolution, DisputeStatus, DisputeType, OptionalResolution,
 };
-pub use dynamic_fees::{compute_fee, DataKey, FeeConfig};
+pub use dynamic_fees::{compute_fee, ArchivePointerRecord, DataKey, FeeConfig};
 pub use events::{
     AttestationCleanedUpEvent, AttestationMigratedEvent, AttestationRevokedEvent,
     AttestationSubmittedEvent, ProofHashUpdatedEvent,
@@ -526,8 +526,145 @@ impl AttestationContract {
     }
 
     pub fn get_attestation(env: Env, business: Address, period: String) -> Option<AttestationData> {
-        let key = DataKey::Attestation(business, period);
-        env.storage().instance().get(&key)
+        let key = DataKey::Attestation(business.clone(), period.clone());
+        // Primary read: active tier.
+        if let Some(data) = env.storage().instance().get::<_, AttestationData>(&key) {
+            return Some(data);
+        }
+        // Read-through: fall back to archive tier transparently.
+        dynamic_fees::get_archived_attestation(&env, &business, &period)
+    }
+
+    // ── Archival tier movement ────────────────────────────────────────
+
+    /// Move attestations older than `age_threshold_seconds` from active storage
+    /// to the archival tier, preserving a lightweight pointer for read-through.
+    ///
+    /// # Parameters
+    /// - `caller`                – must be the contract admin.
+    /// - `candidates`            – list of `(business, period)` pairs to evaluate.
+    ///   Only pairs that are in active storage *and* old enough are moved.
+    /// - `age_threshold_seconds` – minimum age (in seconds) an attestation must
+    ///   have before it is eligible for archival. **Must be > 0.**
+    /// - `limit`                 – maximum number of attestations to archive in
+    ///   this single call (cap to avoid exceeding Soroban CPU budget).
+    ///
+    /// # What happens for each eligible attestation
+    /// 1. Full `AttestationData` is written under `DataKey::ArchivedAttestation`.
+    /// 2. A lightweight `ArchivePointerRecord` (commitment root + sequential
+    ///    archive index + `archived_at` timestamp) is written under
+    ///    `DataKey::ArchivePointer`.
+    /// 3. The original `DataKey::Attestation` entry is removed.
+    ///
+    /// # Returns
+    /// The number of attestations actually archived in this call.
+    ///
+    /// # Panics
+    /// - `age_threshold_seconds == 0` (zero threshold is rejected to prevent
+    ///   accidental mass-archival of all attestations).
+    /// - Caller is not the admin.
+    /// - Contract is paused.
+    pub fn move_to_archive(
+        env: Env,
+        caller: Address,
+        candidates: Vec<(Address, String)>,
+        age_threshold_seconds: u64,
+        limit: u32,
+    ) -> u32 {
+        // Security: admin-only.
+        access_control::require_admin(&env, &caller);
+        // Safety: reject zero threshold to avoid wiping all attestations.
+        assert!(
+            age_threshold_seconds > 0,
+            "age_threshold_seconds must be greater than zero"
+        );
+        // Safety: reject zero limit.
+        assert!(limit > 0, "limit must be greater than zero");
+
+        let now = env.ledger().timestamp();
+        let mut archived_count: u32 = 0;
+
+        for pair in candidates.iter() {
+            if archived_count >= limit {
+                break;
+            }
+            let (business, period) = pair;
+            let key = DataKey::Attestation(business.clone(), period.clone());
+
+            // Only act on attestations that are still in active storage.
+            let data: AttestationData = match env.storage().instance().get(&key) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Age check: attestation timestamp is field .1 (index 1).
+            let attestation_ts: u64 = data.1;
+            // Guard against clock skew / malformed timestamps.
+            let age = if now >= attestation_ts {
+                now - attestation_ts
+            } else {
+                0
+            };
+            if age < age_threshold_seconds {
+                continue;
+            }
+
+            // 1. Persist full data in archive tier.
+            dynamic_fees::set_archived_attestation(&env, &business, &period, &data);
+
+            // 2. Assign a sequential archive index and write pointer.
+            let archive_index = dynamic_fees::next_archive_index(&env);
+            let pointer = ArchivePointerRecord {
+                merkle_root: data.0.clone(),
+                archive_index,
+                archived_at: now,
+            };
+            dynamic_fees::set_archive_pointer(&env, &business, &period, &pointer);
+
+            // 3. Remove the original active-tier entry to free rent.
+            env.storage().instance().remove(&key);
+
+            archived_count += 1;
+        }
+
+        // Bump TTL after potential storage modifications.
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+
+        archived_count
+    }
+
+    /// Return the full archived attestation data for a (business, period) pair,
+    /// if it has been moved to the archive tier.
+    ///
+    /// Returns `None` when the attestation is still in the active tier or does
+    /// not exist at all. For a transparent read (active *or* archived), use
+    /// [`get_attestation`] instead.
+    pub fn get_archived_attestation(
+        env: Env,
+        business: Address,
+        period: String,
+    ) -> Option<AttestationData> {
+        dynamic_fees::get_archived_attestation(&env, &business, &period)
+    }
+
+    /// Return the lightweight archive pointer for a (business, period) pair.
+    ///
+    /// The pointer contains the commitment root (Merkle root), the sequential
+    /// archive index, and the timestamp when the attestation was archived.
+    /// Returns `None` if the attestation has not been archived.
+    pub fn get_archive_pointer(
+        env: Env,
+        business: Address,
+        period: String,
+    ) -> Option<ArchivePointerRecord> {
+        dynamic_fees::get_archive_pointer(&env, &business, &period)
+    }
+
+    /// Return the current global archive index (number of attestations archived so far).
+    pub fn get_archive_index(env: Env) -> u64 {
+        dynamic_fees::get_archive_index(&env)
     }
 
     pub fn is_expired(env: Env, business: Address, period: String) -> bool {
@@ -1717,3 +1854,5 @@ mod ttl_test;
 mod verify_attestation_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod verify_attestations_batch_test;
+#[cfg(test)]
+mod archival_tier_test;
