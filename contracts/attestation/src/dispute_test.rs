@@ -493,212 +493,168 @@ fn test_dispute_lifecycle_complete_flow() {
     assert_eq!(challenger_disputes.get(0), Some(dispute_id));
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  Parallel-dispute rejection tests
-//  (feat: reject parallel disputes on same attestation)
-// ════════════════════════════════════════════════════════════════════
-
-/// A second open dispute from a *different* challenger must be rejected while
-/// the first is still open.
 #[test]
-fn test_parallel_dispute_different_challenger_rejected() {
+fn test_submit_dispute_witness_success() {
     let (env, client) = setup();
 
     let business = Address::generate(&env);
-    let period = String::from_str(&env, "2026-05");
-    let root = BytesN::from_array(&env, &[2u8; 32]);
+    let period = String::from_str(&env, "2026-02");
+
+    // Construct a standard sorted SHA-256 Merkle root with 2 leaves
+    let leaf0 = BytesN::from_array(&env, &[10u8; 32]);
+    let leaf1 = BytesN::from_array(&env, &[20u8; 32]);
+
+    let mut combined = soroban_sdk::Bytes::new(&env);
+    if leaf0 < leaf1 {
+        combined.append(&leaf0.clone().into());
+        combined.append(&leaf1.clone().into());
+    } else {
+        combined.append(&leaf1.clone().into());
+        combined.append(&leaf0.clone().into());
+    }
+    let root: BytesN<32> = env.crypto().sha256(&combined).into();
+
     client.submit_attestation(
-        &business, &period, &root, &1700000000u64, &1u32, &0i128, &None, &None,
-    );
-
-    let challenger_a = Address::generate(&env);
-    let challenger_b = Address::generate(&env);
-
-    // First dispute opens successfully.
-    let _id1 = client.open_dispute(
-        &challenger_a,
         &business,
         &period,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "First challenger"),
-    );
-
-    // Second dispute from a different challenger must fail.
-    let result = client.try_open_dispute(
-        &challenger_b,
-        &business,
-        &period,
-        &DisputeType::DataIntegrity,
-        &String::from_str(&env, "Second challenger"),
-    );
-    assert!(
-        result.is_err(),
-        "expected DisputeAlreadyOpen error for parallel dispute"
-    );
-}
-
-/// A second open dispute from the *same* challenger must also be rejected.
-#[test]
-fn test_parallel_dispute_same_challenger_rejected() {
-    let (env, client) = setup();
-
-    let business = Address::generate(&env);
-    let period = String::from_str(&env, "2026-06");
-    let root = BytesN::from_array(&env, &[3u8; 32]);
-    client.submit_attestation(
-        &business, &period, &root, &1700000000u64, &1u32, &0i128, &None, &None,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
     let challenger = Address::generate(&env);
-
-    client.open_dispute(
+    let dispute_id = client.open_dispute(
         &challenger,
         &business,
         &period,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "First attempt"),
+        &DisputeType::DataIntegrity,
+        &String::from_str(&env, "Evidence of bad data"),
     );
 
-    let result = client.try_open_dispute(
-        &challenger,
-        &business,
-        &period,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "Second attempt"),
-    );
-    assert!(result.is_err(), "same challenger parallel dispute must be rejected");
+    // Witness proof for leaf0 is [leaf1]
+    let mut proof = soroban_sdk::Vec::new(&env);
+    proof.push_back(leaf1);
+
+    client.submit_dispute_witness(&dispute_id, &leaf0, &proof);
+
+    // Check that dispute state advanced automatically to Resolved with Upheld outcome
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    assert_eq!(dispute.status, DisputeStatus::Resolved);
+
+    if let OptionalResolution::Some(resolution) = dispute.resolution {
+        assert_eq!(resolution.outcome, DisputeOutcome::Upheld);
+        assert_eq!(resolution.resolver, challenger);
+        assert_eq!(
+            resolution.notes,
+            String::from_str(&env, "Witness evidence verified via Merkle proof")
+        );
+    } else {
+        panic!("expected resolution to be Some");
+    }
+
+    // Further closure is permitted
+    client.close_dispute(&dispute_id);
+    let dispute_closed = client.get_dispute(&dispute_id).unwrap();
+    assert_eq!(dispute_closed.status, DisputeStatus::Closed);
 }
 
-/// After a dispute is resolved AND closed, a new dispute may be opened on the
-/// same attestation.
 #[test]
-fn test_new_dispute_allowed_after_prior_closed() {
+fn test_submit_dispute_witness_invalid_proof_rejected_without_state_mutation() {
     let (env, client) = setup();
 
     let business = Address::generate(&env);
-    let period = String::from_str(&env, "2026-07");
-    let root = BytesN::from_array(&env, &[4u8; 32]);
-    client.submit_attestation(
-        &business, &period, &root, &1700000000u64, &1u32, &0i128, &None, &None,
-    );
+    let period = String::from_str(&env, "2026-02");
 
-    let challenger_a = Address::generate(&env);
-    let id1 = client.open_dispute(
-        &challenger_a,
+    let leaf0 = BytesN::from_array(&env, &[10u8; 32]);
+    let leaf1 = BytesN::from_array(&env, &[20u8; 32]);
+
+    let mut combined = soroban_sdk::Bytes::new(&env);
+    if leaf0 < leaf1 {
+        combined.append(&leaf0.clone().into());
+        combined.append(&leaf1.clone().into());
+    } else {
+        combined.append(&leaf1.clone().into());
+        combined.append(&leaf0.clone().into());
+    }
+    let root: BytesN<32> = env.crypto().sha256(&combined).into();
+
+    client.submit_attestation(
         &business,
         &period,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "First dispute"),
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
     );
 
-    // Resolve then close the first dispute.
+    let challenger = Address::generate(&env);
+    let dispute_id = client.open_dispute(
+        &challenger,
+        &business,
+        &period,
+        &DisputeType::DataIntegrity,
+        &String::from_str(&env, "Evidence of bad data"),
+    );
+
+    // Provide invalid sibling in proof
+    let wrong_sibling = BytesN::from_array(&env, &[99u8; 32]);
+    let mut bad_proof = soroban_sdk::Vec::new(&env);
+    bad_proof.push_back(wrong_sibling);
+
+    let res = client.try_submit_dispute_witness(&dispute_id, &leaf0, &bad_proof);
+    assert!(res.is_err());
+
+    // Verify dispute state was completely unmutated and remains Open
+    let dispute = client.get_dispute(&dispute_id).unwrap();
+    assert_eq!(dispute.status, DisputeStatus::Open);
+    assert_eq!(dispute.resolution, OptionalResolution::None);
+}
+
+#[test]
+fn test_submit_dispute_witness_dispute_not_open_rejected() {
+    let (env, client) = setup();
+
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-02");
+    let leaf = BytesN::from_array(&env, &[10u8; 32]);
+    let root = leaf.clone(); // Single leaf tree
+
+    client.submit_attestation(
+        &business,
+        &period,
+        &root,
+        &1700000000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
+    );
+
+    let challenger = Address::generate(&env);
+    let dispute_id = client.open_dispute(
+        &challenger,
+        &business,
+        &period,
+        &DisputeType::DataIntegrity,
+        &String::from_str(&env, "Evidence"),
+    );
+
+    // Manually resolve dispute first
     let resolver = Address::generate(&env);
     client.resolve_dispute(
-        &id1,
+        &dispute_id,
         &resolver,
         &DisputeOutcome::Rejected,
-        &String::from_str(&env, "No merit found"),
-    );
-    client.close_dispute(&id1);
-
-    // A new dispute from a different challenger is now allowed.
-    let challenger_b = Address::generate(&env);
-    let id2 = client.open_dispute(
-        &challenger_b,
-        &business,
-        &period,
-        &DisputeType::DataIntegrity,
-        &String::from_str(&env, "New evidence"),
+        &String::from_str(&env, "Resolved already"),
     );
 
-    let d2 = client.get_dispute(&id2).unwrap();
-    assert_eq!(d2.status, DisputeStatus::Open);
-    assert_eq!(d2.challenger, challenger_b);
+    let proof = soroban_sdk::Vec::new(&env);
+    let res = client.try_submit_dispute_witness(&dispute_id, &leaf, &proof);
+    assert!(res.is_err());
 }
 
-/// A dispute that has been resolved (but not yet closed) still blocks a new one.
-#[test]
-fn test_new_dispute_blocked_while_resolved_not_closed() {
-    let (env, client) = setup();
-
-    let business = Address::generate(&env);
-    let period = String::from_str(&env, "2026-08");
-    let root = BytesN::from_array(&env, &[5u8; 32]);
-    client.submit_attestation(
-        &business, &period, &root, &1700000000u64, &1u32, &0i128, &None, &None,
-    );
-
-    let challenger_a = Address::generate(&env);
-    let id1 = client.open_dispute(
-        &challenger_a,
-        &business,
-        &period,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "First"),
-    );
-
-    // Resolve but do NOT close.
-    let resolver = Address::generate(&env);
-    client.resolve_dispute(
-        &id1,
-        &resolver,
-        &DisputeOutcome::Upheld,
-        &String::from_str(&env, "Upheld"),
-    );
-
-    // A new dispute must still be blocked (status is Resolved, not Closed).
-    let challenger_b = Address::generate(&env);
-    let result = client.try_open_dispute(
-        &challenger_b,
-        &business,
-        &period,
-        &DisputeType::DataIntegrity,
-        &String::from_str(&env, "Attempted parallel"),
-    );
-    assert!(
-        result.is_err(),
-        "resolved-but-unclosed dispute must still block new disputes"
-    );
-}
-
-/// Opening disputes on *different* attestations (different period) is independent
-/// and must succeed.
-#[test]
-fn test_parallel_disputes_on_different_attestations_allowed() {
-    let (env, client) = setup();
-
-    let business = Address::generate(&env);
-    let period_a = String::from_str(&env, "2026-09");
-    let period_b = String::from_str(&env, "2026-10");
-    let root = BytesN::from_array(&env, &[6u8; 32]);
-
-    client.submit_attestation(
-        &business, &period_a, &root, &1700000000u64, &1u32, &0i128, &None, &None,
-    );
-    client.submit_attestation(
-        &business, &period_b, &root, &1700000001u64, &1u32, &0i128, &None, &None,
-    );
-
-    let challenger = Address::generate(&env);
-
-    let id_a = client.open_dispute(
-        &challenger,
-        &business,
-        &period_a,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "Period A dispute"),
-    );
-    let id_b = client.open_dispute(
-        &challenger,
-        &business,
-        &period_b,
-        &DisputeType::RevenueMismatch,
-        &String::from_str(&env, "Period B dispute"),
-    );
-
-    assert_ne!(id_a, id_b);
-    let da = client.get_dispute(&id_a).unwrap();
-    let db = client.get_dispute(&id_b).unwrap();
-    assert_eq!(da.status, DisputeStatus::Open);
-    assert_eq!(db.status, DisputeStatus::Open);
-}

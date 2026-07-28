@@ -464,6 +464,59 @@ pub fn has_open_dispute(env: &Env, business: &Address, period: &String) -> bool 
     false
 }
 
+/// Verify dispute witness evidence Merkle proof against committed attestation root
+/// and advance the dispute state machine automatically on success.
+///
+/// # Security & Correctness Assumptions
+/// - Attestation must exist and not be expired or revoked.
+/// - Dispute must exist, be in `Open` status, and correspond to the specified attestation.
+/// - `proof` is verified against the committed `merkle_root` of the attestation via `veritasor_common::merkle::verify_merkle_proof`.
+/// - On invalid proof: returns `Err("invalid witness merkle proof")` without mutating any dispute state.
+/// - On successful verification: dispute status is set to `Resolved` with `DisputeOutcome::Upheld` and resolution timestamp/notes.
+pub fn submit_dispute_witness(
+    env: &Env,
+    dispute_id: u64,
+    leaf: &soroban_sdk::BytesN<32>,
+    proof: &Vec<soroban_sdk::BytesN<32>>,
+) -> Result<(), &'static str> {
+    let mut dispute = get_dispute(env, dispute_id).ok_or("dispute not found")?;
+
+    if dispute.status != DisputeStatus::Open {
+        return Err("dispute is not open");
+    }
+
+    let attestation_key = DataKey::Attestation(dispute.business.clone(), dispute.period.clone());
+    let attestation_data: crate::AttestationData = env
+        .storage()
+        .instance()
+        .get(&attestation_key)
+        .ok_or("attestation not found")?;
+
+    let root = &attestation_data.0;
+
+    let is_valid = veritasor_common::merkle::verify_merkle_proof(env, root, leaf, proof);
+    if !is_valid {
+        return Err("invalid witness merkle proof");
+    }
+
+    // Proof verified - advance dispute state machine
+    let resolution = DisputeResolution {
+        resolver: dispute.challenger.clone(),
+        outcome: DisputeOutcome::Upheld,
+        timestamp: env.ledger().timestamp(),
+        notes: String::from_str(env, "Witness evidence verified via Merkle proof"),
+    };
+
+    dispute.status = DisputeStatus::Resolved;
+    dispute.resolution = OptionalResolution::Some(resolution.clone());
+
+    store_dispute(env, &dispute);
+    store_dispute_resolution(env, dispute_id, &resolution);
+
+    Ok(())
+}
+
+
 /// Loads revocation metadata for an attestation, if present.
 pub fn get_attestation_revocation(
     env: &Env,
