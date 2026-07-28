@@ -5,8 +5,9 @@
 
 use super::*;
 use crate::access_control::{ROLE_ADMIN, ROLE_ATTESTOR, ROLE_BUSINESS, ROLE_OPERATOR};
-use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, BytesN, Env, String};
+use crate::events::{AdminSwappedEvent, TOPIC_ADMIN_SWAPPED};
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::{Address, BytesN, Env, String, TryFromVal};
 
 /// Helper: register the contract and return a client.
 fn setup() -> (Env, AttestationContractClient<'static>, Address) {
@@ -536,250 +537,161 @@ fn test_fuzz_grant_revoke_role_random_bitmaps() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  Weighted Admin Quorum Tests
+//  Swap Admin Tests
 // ════════════════════════════════════════════════════════════════════
 
-/// After initialization the first admin has the default weight (1).
 #[test]
-fn test_default_admin_weight_is_one() {
-    let (_env, client, admin) = setup();
-    assert_eq!(client.get_admin_weight(&admin), 1u32);
+fn test_swap_admin_basic() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    assert!(client.has_role(&admin, &ROLE_ADMIN));
+    assert!(!client.has_role(&new_admin, &ROLE_ADMIN));
+
+    client.swap_admin(&admin, &admin, &new_admin);
+
+    assert!(!client.has_role(&admin, &ROLE_ADMIN));
+    assert!(client.has_role(&new_admin, &ROLE_ADMIN));
 }
 
-/// Setting a weight in range succeeds and is reflected by get_admin_weight.
 #[test]
-fn test_set_admin_weight_stores_value() {
-    let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &42u32);
-    assert_eq!(client.get_admin_weight(&admin), 42u32);
+fn test_swap_admin_emits_combined_event() {
+    let (env, client, admin) = setup();
+    let new_admin = Address::generate(&env);
+
+    let events_before = env.events().all().len();
+
+    client.swap_admin(&admin, &admin, &new_admin);
+
+    let all_events = env.events().all();
+    assert!(
+        all_events.len() > events_before,
+        "swap_admin must emit at least one event"
+    );
+
+    let (_cid, topics, data) = all_events.last().unwrap();
+
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        TOPIC_ADMIN_SWAPPED
+    );
+
+    let ev = AdminSwappedEvent::try_from_val(&env, &data).unwrap();
+    assert_eq!(ev.old_admin, admin);
+    assert_eq!(ev.new_admin, new_admin);
+    assert_eq!(ev.swapped_by, admin);
 }
 
-/// Setting weight to MAX_ADMIN_WEIGHT (1000) is accepted.
 #[test]
-fn test_set_admin_weight_at_max_boundary() {
-    let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &1000u32);
-    assert_eq!(client.get_admin_weight(&admin), 1000u32);
+fn test_swap_admin_new_already_admin() {
+    let (env, client, admin) = setup();
+    let other_admin = Address::generate(&env);
+
+    client.grant_role(&admin, &other_admin, &ROLE_ADMIN);
+
+    assert!(client.has_role(&admin, &ROLE_ADMIN));
+    assert!(client.has_role(&other_admin, &ROLE_ADMIN));
+
+    client.swap_admin(&admin, &admin, &other_admin);
+
+    assert!(!client.has_role(&admin, &ROLE_ADMIN));
+    assert!(client.has_role(&other_admin, &ROLE_ADMIN));
 }
 
-/// Setting weight to 1 (minimum valid) is accepted.
 #[test]
-fn test_set_admin_weight_at_min_boundary() {
+fn test_swap_admin_self_swap_is_idempotent() {
     let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &1u32);
-    assert_eq!(client.get_admin_weight(&admin), 1u32);
+
+    assert!(client.has_role(&admin, &ROLE_ADMIN));
+
+    client.swap_admin(&admin, &admin, &admin);
+
+    assert!(client.has_role(&admin, &ROLE_ADMIN));
 }
 
-/// Zero weight is rejected.
-#[test]
-#[should_panic(expected = "admin weight cannot be zero")]
-fn test_zero_weight_rejected() {
-    let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &0u32);
-}
-
-/// Weight exceeding MAX_ADMIN_WEIGHT is rejected.
-#[test]
-#[should_panic(expected = "admin weight exceeds MAX_ADMIN_WEIGHT")]
-fn test_weight_above_max_rejected() {
-    let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &1001u32);
-}
-
-/// Only an admin can call set_admin_weight.
 #[test]
 #[should_panic(expected = "caller does not have ADMIN role")]
-fn test_non_admin_cannot_set_weight() {
+fn test_non_admin_cannot_swap() {
     let (env, client, _admin) = setup();
     let non_admin = Address::generate(&env);
     let target = Address::generate(&env);
-    client.set_admin_weight(&non_admin, &target, &5u32);
+
+    client.swap_admin(&non_admin, &target, &target);
 }
 
-/// set_admin_weight on a non-admin address is rejected.
 #[test]
-#[should_panic(expected = "account does not hold ROLE_ADMIN")]
-fn test_cannot_set_weight_for_non_admin_account() {
+#[should_panic(expected = "old_admin does not have ADMIN role")]
+fn test_swap_admin_old_not_admin() {
     let (env, client, admin) = setup();
-    let non_admin = Address::generate(&env);
-    // non_admin does not hold ROLE_ADMIN — should panic
-    client.set_admin_weight(&admin, &non_admin, &5u32);
+    let nobody = Address::generate(&env);
+
+    client.swap_admin(&admin, &nobody, &admin);
 }
 
-/// Quorum weight for a single admin with default weight equals 1.
 #[test]
-fn test_quorum_weight_single_admin_default() {
-    let (_env, client, _admin) = setup();
-    assert_eq!(client.get_admin_quorum_weight(), 1u64);
-}
-
-/// Quorum weight reflects an updated weight for the only admin.
-#[test]
-fn test_quorum_weight_single_admin_custom() {
-    let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &7u32);
-    assert_eq!(client.get_admin_quorum_weight(), 7u64);
-}
-
-/// Multiple admins with default weights sum to their count.
-#[test]
-fn test_quorum_weight_multiple_admins_default() {
+#[should_panic(expected = "swap would leave no admin remaining")]
+fn test_swap_admin_would_leave_no_admin() {
     let (env, client, admin) = setup();
-    let admin2 = Address::generate(&env);
-    let admin3 = Address::generate(&env);
+    let target = Address::generate(&env);
 
-    client.grant_role(&admin, &admin2, &ROLE_ADMIN);
-    client.grant_role(&admin, &admin3, &ROLE_ADMIN);
-
-    // 3 admins × weight 1 each
-    assert_eq!(client.get_admin_quorum_weight(), 3u64);
+    // admin is the only admin; swapping to target with no other admins should fail
+    client.swap_admin(&admin, &admin, &target);
 }
 
-/// Weighted quorum sums correctly when admins have different weights.
-/// Scenario: Founder (weight 3) + 2× Ops key (weight 1) → total 5.
 #[test]
-fn test_quorum_weight_founder_plus_ops() {
-    let (env, client, founder) = setup();
-    let ops1 = Address::generate(&env);
-    let ops2 = Address::generate(&env);
-
-    client.grant_role(&founder, &ops1, &ROLE_ADMIN);
-    client.grant_role(&founder, &ops2, &ROLE_ADMIN);
-
-    // Founder gets weight 3
-    client.set_admin_weight(&founder, &founder, &3u32);
-    // Ops keys keep default weight 1
-
-    assert_eq!(client.get_admin_quorum_weight(), 5u64);
-}
-
-/// Revoking ROLE_ADMIN from a member removes their weight from the quorum sum.
-#[test]
-fn test_quorum_weight_decreases_when_admin_revoked() {
+fn test_swap_admin_preserves_other_admins() {
     let (env, client, admin) = setup();
-    let admin2 = Address::generate(&env);
+    let admin_b = Address::generate(&env);
+    let admin_c = Address::generate(&env);
+    let target = Address::generate(&env);
 
-    client.grant_role(&admin, &admin2, &ROLE_ADMIN);
-    client.set_admin_weight(&admin, &admin2, &10u32);
+    client.grant_role(&admin, &admin_b, &ROLE_ADMIN);
+    client.grant_role(&admin, &admin_c, &ROLE_ADMIN);
 
-    // admin(1) + admin2(10) = 11
-    assert_eq!(client.get_admin_quorum_weight(), 11u64);
+    // Swap admin_b out — admin and admin_c remain
+    client.swap_admin(&admin, &admin_b, &target);
 
-    // Remove admin2's ROLE_ADMIN
-    client.revoke_role(&admin, &admin2, &ROLE_ADMIN);
-
-    // Only admin(1) remains
-    assert_eq!(client.get_admin_quorum_weight(), 1u64);
+    assert!(client.has_role(&admin, &ROLE_ADMIN));
+    assert!(!client.has_role(&admin_b, &ROLE_ADMIN));
+    assert!(client.has_role(&admin_c, &ROLE_ADMIN));
+    assert!(client.has_role(&target, &ROLE_ADMIN));
 }
 
-/// After revoking ROLE_ADMIN from admin2, set_admin_weight on them must fail
-/// even though a weight entry may still exist in storage.
 #[test]
-#[should_panic(expected = "account does not hold ROLE_ADMIN")]
-fn test_set_weight_after_role_revocation_panics() {
+fn test_swap_admin_new_other_roles_preserved() {
     let (env, client, admin) = setup();
-    let admin2 = Address::generate(&env);
+    let target = Address::generate(&env);
 
-    client.grant_role(&admin, &admin2, &ROLE_ADMIN);
-    client.revoke_role(&admin, &admin2, &ROLE_ADMIN);
+    client.grant_role(&admin, &target, &ROLE_ATTESTOR);
+    client.grant_role(&admin, &target, &ROLE_BUSINESS);
 
-    // admin2 no longer holds ROLE_ADMIN — weight update must be rejected
-    client.set_admin_weight(&admin, &admin2, &5u32);
+    assert!(!client.has_role(&target, &ROLE_ADMIN));
+
+    // Add another admin so the invariant holds when we swap admin out
+    let extra_admin = Address::generate(&env);
+    client.grant_role(&admin, &extra_admin, &ROLE_ADMIN);
+
+    client.swap_admin(&admin, &admin, &target);
+
+    assert!(client.has_role(&target, &ROLE_ADMIN));
+    assert!(client.has_role(&target, &ROLE_ATTESTOR));
+    assert!(client.has_role(&target, &ROLE_BUSINESS));
+    assert!(!client.has_role(&admin, &ROLE_ADMIN));
 }
 
-/// A freshly granted admin who has never had a weight set contributes
-/// DEFAULT_ADMIN_WEIGHT (1) to the quorum.
 #[test]
-fn test_new_admin_contributes_default_weight_to_quorum() {
+fn test_swap_admin_old_other_roles_preserved() {
     let (env, client, admin) = setup();
-    let admin2 = Address::generate(&env);
+    let new_admin = Address::generate(&env);
 
-    let before = client.get_admin_quorum_weight();
-    client.grant_role(&admin, &admin2, &ROLE_ADMIN);
-    let after = client.get_admin_quorum_weight();
+    client.grant_role(&admin, &admin, &ROLE_ATTESTOR);
+    client.grant_role(&admin, &admin, &ROLE_OPERATOR);
 
-    assert_eq!(after - before, 1u64); // exactly DEFAULT_ADMIN_WEIGHT
-}
+    client.swap_admin(&admin, &admin, &new_admin);
 
-/// Updating a weight twice uses the latest value.
-#[test]
-fn test_update_weight_twice_uses_latest() {
-    let (_env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &200u32);
-    client.set_admin_weight(&admin, &admin, &50u32);
-    assert_eq!(client.get_admin_weight(&admin), 50u32);
-    assert_eq!(client.get_admin_quorum_weight(), 50u64);
-}
-
-/// A non-admin address always returns DEFAULT_ADMIN_WEIGHT from
-/// get_admin_weight (the stored default), but is not included in
-/// the quorum sum.
-#[test]
-fn test_non_admin_weight_not_included_in_quorum() {
-    let (env, client, admin) = setup();
-    let non_admin = Address::generate(&env);
-    // non_admin has default weight = 1
-    assert_eq!(client.get_admin_weight(&non_admin), 1u32);
-    // But the quorum only counts the original admin
-    assert_eq!(client.get_admin_quorum_weight(), 1u64);
-}
-
-/// AdminWeightChanged event is emitted with correct fields when weight is set.
-#[test]
-fn test_admin_weight_changed_event_emitted() {
-    use soroban_sdk::testutils::Events as _;
-    use crate::events::{AdminWeightChangedEvent, TOPIC_ADMIN_WEIGHT_CHANGED};
-
-    let (env, client, admin) = setup();
-    client.set_admin_weight(&admin, &admin, &42u32);
-
-    let events = env.events().all();
-    let found = events.iter().any(|(_, topics, data)| {
-        // Check if the first topic is the TOPIC_ADMIN_WEIGHT_CHANGED symbol
-        let topic_match = topics.len() >= 1 && {
-            let first = topics.get(0).unwrap();
-            first == soroban_sdk::Val::from(TOPIC_ADMIN_WEIGHT_CHANGED)
-        };
-        if !topic_match {
-            return false;
-        }
-        // Decode data and verify fields
-        if let Ok(event) = AdminWeightChangedEvent::try_from_val(&env, &data) {
-            event.new_weight == 42
-                && event.old_weight == 1
-                && event.account == admin
-                && event.changed_by == admin
-        } else {
-            false
-        }
-    });
-    assert!(found, "AdminWeightChanged event not found or fields incorrect");
-}
-
-/// MAX_ADMIN_WEIGHT constant is exposed and equals 1000.
-#[test]
-fn test_max_admin_weight_constant() {
-    use crate::access_control::MAX_ADMIN_WEIGHT;
-    assert_eq!(MAX_ADMIN_WEIGHT, 1000u32);
-}
-
-/// DEFAULT_ADMIN_WEIGHT constant is exposed and equals 1.
-#[test]
-fn test_default_admin_weight_constant() {
-    use crate::access_control::DEFAULT_ADMIN_WEIGHT;
-    assert_eq!(DEFAULT_ADMIN_WEIGHT, 1u32);
-}
-
-/// Weighted quorum with all admins at max weight does not overflow u64.
-/// 2 admins × MAX_ADMIN_WEIGHT (1000) = 2000 — well within u64.
-#[test]
-fn test_quorum_weight_no_overflow_with_max_weights() {
-    let (env, client, admin) = setup();
-    let admin2 = Address::generate(&env);
-
-    client.grant_role(&admin, &admin2, &ROLE_ADMIN);
-    client.set_admin_weight(&admin, &admin, &1000u32);
-    client.set_admin_weight(&admin, &admin2, &1000u32);
-
-    assert_eq!(client.get_admin_quorum_weight(), 2000u64);
+    assert!(!client.has_role(&admin, &ROLE_ADMIN));
+    assert!(client.has_role(&admin, &ROLE_ATTESTOR));
+    assert!(client.has_role(&admin, &ROLE_OPERATOR));
+    assert!(client.has_role(&new_admin, &ROLE_ADMIN));
 }

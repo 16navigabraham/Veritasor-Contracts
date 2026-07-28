@@ -27,7 +27,7 @@
 //! | `AttestationMigrated`       | `att_mig`      | `business`        |
 //! | `RoleGranted`               | `role_gr`      | `account`         |
 //! | `RoleRevoked`               | `role_rv`      | `account`         |
-//! | `AdminWeightChanged`        | `adm_wt`       | `account`         |
+//! | `AdminSwapped`              | `adm_sw`       | *(none)*          |
 //! | `ContractPaused`            | `paused`       | *(none)*          |
 //! | `ContractUnpaused`          | `unpaus`       | *(none)*          |
 //! | `FeeConfigChanged`          | `fee_cfg`      | *(none)*          |
@@ -103,8 +103,8 @@ pub const TOPIC_ATTESTATION_CLEANED_UP: Symbol = symbol_short!("att_cl");
 pub const TOPIC_ROLE_GRANTED: Symbol = symbol_short!("role_gr");
 /// Topic: role revoked from an address
 pub const TOPIC_ROLE_REVOKED: Symbol = symbol_short!("role_rv");
-/// Topic: admin voting weight changed
-pub const TOPIC_ADMIN_WEIGHT_CHANGED: Symbol = symbol_short!("adm_wt");
+/// Topic: admin atomically swapped (revoke old + grant new)
+pub const TOPIC_ADMIN_SWAPPED: Symbol = symbol_short!("adm_sw");
 /// Topic: contract paused
 pub const TOPIC_PAUSED: Symbol = symbol_short!("paused");
 /// Topic: contract unpaused
@@ -379,22 +379,19 @@ pub struct RoleChangedEvent {
     pub changed_by: Address,
 }
 
-/// Normalized payload for `AdminWeightChanged` events.
+/// Normalized payload for `AdminSwapped` events.
 ///
-/// Emitted whenever `set_admin_weight` successfully updates the quorum weight
-/// of an admin member.  Both old and new weights are included so indexers can
-/// track the full weight history without needing to reconstruct prior state.
+/// Emitted when an admin is atomically replaced by another address.
+/// Ensures the admin allowlist is never left without a member.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct AdminWeightChangedEvent {
-    /// Admin address whose weight was changed.
-    pub account: Address,
-    /// Weight before the change.
-    pub old_weight: u32,
-    /// Weight after the change.
-    pub new_weight: u32,
-    /// Address that authorized the change (must hold ROLE_ADMIN).
-    pub changed_by: Address,
+pub struct AdminSwappedEvent {
+    /// Address whose ADMIN role was revoked.
+    pub old_admin: Address,
+    /// Address that received the ADMIN role.
+    pub new_admin: Address,
+    /// Address that authorized the swap (must hold ADMIN role).
+    pub swapped_by: Address,
 }
 
 // ── Pause / unpause ───────────────────────────────────────────────
@@ -953,38 +950,34 @@ pub fn emit_role_revoked(env: &Env, account: &Address, role: u32, changed_by: &A
         .publish((TOPIC_ROLE_REVOKED, account.clone()), event);
 }
 
-/// Emit an `AdminWeightChanged` event.
+/// Emit an `AdminSwapped` event.
 ///
-/// Called by `set_admin_weight` after the new weight has been written to
-/// storage.  Both old and new weights are included so indexers can reconstruct
-/// the full weight history.
+/// Call this after an atomic admin swap has been durably stored.
+/// Combines the revoke and grant into a single event for indexer
+/// efficiency and audit clarity.
 ///
 /// # Arguments
 ///
-/// * `env`        – Soroban execution environment.
-/// * `account`    – Admin address whose weight changed.
-/// * `old_weight` – Weight before the change.
-/// * `new_weight` – Weight after the change.
-/// * `changed_by` – Address that authorized the change (must hold ROLE_ADMIN).
+/// * `env`         – Soroban execution environment.
+/// * `old_admin`   – Address whose ADMIN role was revoked.
+/// * `new_admin`   – Address that received the ADMIN role.
+/// * `swapped_by`  – Address that authorized the swap.
 ///
 /// # Events
 ///
-/// Publishes `(adm_wt, account)` → `AdminWeightChangedEvent`.
-pub fn emit_admin_weight_changed(
+/// Publishes `(adm_sw,)` → `AdminSwappedEvent`.
+pub fn emit_admin_swapped(
     env: &Env,
-    account: &Address,
-    old_weight: u32,
-    new_weight: u32,
-    changed_by: &Address,
+    old_admin: &Address,
+    new_admin: &Address,
+    swapped_by: &Address,
 ) {
-    let event = AdminWeightChangedEvent {
-        account: account.clone(),
-        old_weight,
-        new_weight,
-        changed_by: changed_by.clone(),
+    let event = AdminSwappedEvent {
+        old_admin: old_admin.clone(),
+        new_admin: new_admin.clone(),
+        swapped_by: swapped_by.clone(),
     };
-    env.events()
-        .publish((TOPIC_ADMIN_WEIGHT_CHANGED, account.clone()), event);
+    env.events().publish((TOPIC_ADMIN_SWAPPED,), event);
 }
 
 // ── Pause / unpause ───────────────────────────────────────────────
