@@ -244,8 +244,8 @@ fn schedule_pause_auto_applies_on_schedule_pause_call() {
     // Calling schedule_pause again triggers auto-apply of the first one
     let future = env.ledger().timestamp() + 7200;
     client.schedule_pause(&admin, &future, &2u64);
-    // After auto-apply and new schedule, contract is not paused
-    assert!(!client.is_paused());
+    // Auto-apply pauses the contract, then a new pause is scheduled for the future
+    assert!(client.is_paused());
     assert_eq!(
         client.get_pending_pause_effective_at(),
         Some(future)
