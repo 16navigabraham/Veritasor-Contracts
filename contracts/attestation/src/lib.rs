@@ -442,20 +442,12 @@ impl AttestationContract {
             expiry_timestamp,
         );
 
-        // ── Epoch checkpoint ──────────────────────────────────────────────
-        // Accumulate per-epoch counters and emit a reproducible checkpoint so
-        // third parties can reconstruct the epoch state deterministically.
-        let epoch_submissions =
-            dynamic_fees::increment_epoch_submissions(env, period, 1);
-        let epoch_fees =
-            dynamic_fees::accumulate_epoch_fees(env, period, total_fee);
-        events::emit_epoch_checkpoint(
-            env,
-            period,
-            merkle_root,
-            epoch_submissions,
-            epoch_fees,
-        );
+        // ── Epoch checkpoint ──────────────────────────────────
+        // Update per-epoch accumulators then emit a reproducible checkpoint
+        // so third parties can reconstruct epoch state deterministically.
+        let epoch_subs = dynamic_fees::increment_epoch_submissions(env, period, 1);
+        let epoch_fees = dynamic_fees::accumulate_epoch_fees(env, period, total_fee);
+        events::emit_epoch_checkpoint(env, period, merkle_root, epoch_subs, epoch_fees);
 
         rate_limit::record_submission(env, business);
 
@@ -543,16 +535,14 @@ impl AttestationContract {
                 item.expiry_timestamp,
             );
 
-            // ── Epoch checkpoint per batch item ───────────────────────────
-            let epoch_submissions =
-                dynamic_fees::increment_epoch_submissions(env, &item.period, 1);
-            let epoch_fees =
-                dynamic_fees::accumulate_epoch_fees(env, &item.period, total_fee);
+            // ── Epoch checkpoint per batch item ──────────────
+            let epoch_subs = dynamic_fees::increment_epoch_submissions(env, &item.period, 1);
+            let epoch_fees = dynamic_fees::accumulate_epoch_fees(env, &item.period, total_fee);
             events::emit_epoch_checkpoint(
                 env,
                 &item.period,
                 &item.merkle_root,
-                epoch_submissions,
+                epoch_subs,
                 epoch_fees,
             );
 

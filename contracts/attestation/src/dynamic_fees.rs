@@ -119,7 +119,7 @@ pub enum DataKey {
 
     // ── Epoch checkpointing ────────────────────────────────────
     /// Cumulative submission count for a given period (epoch).
-    /// Keyed by period string (e.g., `"2026-02"`).
+    /// Keyed by period string (e.g. `"2026-02"`).
     EpochSubmissions(soroban_sdk::String),
     /// Cumulative fees collected for a given period (epoch).
     /// Keyed by period string.
@@ -419,15 +419,17 @@ pub fn collect_fee_from(env: &Env, payer: &Address, business: &Address) -> i128 
 // ════════════════════════════════════════════════════════════════════
 //  Epoch accumulator helpers
 //
-//  These functions maintain per-period (epoch) counters that power the
-//  EpochCheckpoint event.  Counters are stored in instance storage under
-//  DataKey::EpochSubmissions and DataKey::EpochFeesCollected so they
-//  survive across ledger boundaries while sharing the contract's TTL.
+//  Per-period (epoch) counters that power the EpochCheckpoint event.
+//  Stored in instance storage so they persist across ledger boundaries
+//  and share the contract's TTL budget.
+//
+//  Saturating arithmetic is used throughout: counters can only grow,
+//  preventing overflow-based manipulation that could reset a total and
+//  mislead third-party replayers.
 // ════════════════════════════════════════════════════════════════════
 
-/// Return the cumulative submission count for `period`.
-///
-/// Returns `0` if no submissions have been recorded for this period yet.
+/// Return the cumulative submission count for `period`.  Returns `0` if the
+/// period has never received a submission.
 pub fn get_epoch_submissions(env: &Env, period: &soroban_sdk::String) -> u64 {
     env.storage()
         .instance()
@@ -435,24 +437,18 @@ pub fn get_epoch_submissions(env: &Env, period: &soroban_sdk::String) -> u64 {
         .unwrap_or(0u64)
 }
 
-/// Increment the submission count for `period` by `delta` and return the
-/// updated total.
-pub fn increment_epoch_submissions(
-    env: &Env,
-    period: &soroban_sdk::String,
-    delta: u64,
-) -> u64 {
-    let prev = get_epoch_submissions(env, period);
-    let next = prev.saturating_add(delta);
+/// Increment the submission count for `period` by `delta` and persist it.
+/// Returns the updated total.
+pub fn increment_epoch_submissions(env: &Env, period: &soroban_sdk::String, delta: u64) -> u64 {
+    let next = get_epoch_submissions(env, period).saturating_add(delta);
     env.storage()
         .instance()
         .set(&DataKey::EpochSubmissions(period.clone()), &next);
     next
 }
 
-/// Return the cumulative fees collected for `period`.
-///
-/// Returns `0` if no fees have been recorded for this period yet.
+/// Return the cumulative fees collected for `period`.  Returns `0` if the
+/// period has never received a submission.
 pub fn get_epoch_fees_collected(env: &Env, period: &soroban_sdk::String) -> i128 {
     env.storage()
         .instance()
@@ -460,15 +456,10 @@ pub fn get_epoch_fees_collected(env: &Env, period: &soroban_sdk::String) -> i128
         .unwrap_or(0i128)
 }
 
-/// Add `amount` to the cumulative fee total for `period` and return the
-/// updated total.
-pub fn accumulate_epoch_fees(
-    env: &Env,
-    period: &soroban_sdk::String,
-    amount: i128,
-) -> i128 {
-    let prev = get_epoch_fees_collected(env, period);
-    let next = prev.saturating_add(amount);
+/// Add `amount` to the cumulative fee total for `period` and persist it.
+/// Returns the updated total.
+pub fn accumulate_epoch_fees(env: &Env, period: &soroban_sdk::String, amount: i128) -> i128 {
+    let next = get_epoch_fees_collected(env, period).saturating_add(amount);
     env.storage()
         .instance()
         .set(&DataKey::EpochFeesCollected(period.clone()), &next);

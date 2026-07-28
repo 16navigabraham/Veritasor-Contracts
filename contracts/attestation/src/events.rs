@@ -129,7 +129,7 @@ pub const TOPIC_BIZ_SUSPENDED: Symbol = symbol_short!("biz_sus");
 pub const TOPIC_BIZ_REACTIVATE: Symbol = symbol_short!("biz_rea");
 /// Topic: proof hash updated
 pub const TOPIC_PROOF_HASH_UPDATED: Symbol = symbol_short!("ph_upd");
-/// Topic: epoch checkpoint — emitted on every submission to allow deterministic
+/// Topic: epoch checkpoint — emitted on every submission for deterministic
 /// third-party replay of per-epoch state.
 pub const TOPIC_EPOCH_CHECKPOINT: Symbol = symbol_short!("ep_ckpt");
 
@@ -1098,48 +1098,51 @@ pub fn emit_proof_hash_updated(
 ///
 /// Given the sequence of `EpochCheckpoint` events for a `period`, an indexer
 /// can deterministically reconstruct:
-/// - The cumulative number of attestation submissions (`submissions_count`).
-/// - The cumulative fees collected in that epoch (`fees_collected`).
+///
+/// - The cumulative number of submissions in the epoch (`submissions_count`).
+/// - The cumulative fees collected (`fees_collected`).
 /// - The most-recently committed Merkle root (`state_root`).
 ///
-/// The final checkpoint in a period represents the canonical epoch state
-/// at rollover.
+/// The **final** checkpoint for a period is the canonical epoch state at rollover.
 ///
 /// ## Security Notes
 ///
-/// - Only emitted from `execute_submission` and `execute_batch_submission`;
-///   no external caller can forge this event.
-/// - `state_root` is the Merkle root of the most recent attestation written
-///   within the period — not a cross-submission aggregate root.
+/// - Only emitted from `execute_submission` / `execute_batch_submission` inside
+///   the attestation contract; no external caller can forge this event.
+/// - `state_root` is the Merkle root of the **most recent** attestation written
+///   to the period, not a cross-submission aggregate.  Indexers that need a
+///   full-epoch aggregate root should combine individual submission roots.
+/// - Accumulators use saturating arithmetic — they cannot overflow and be
+///   reset to a lower value to mislead replayers.
 /// - No private keys, raw signatures, or personal data are included.
 ///
 /// This struct is an indexer-facing wire contract; field order and types are
-/// part of compatibility guarantees.  See `EVENT_SCHEMA_VERSION`.
+/// part of the compatibility guarantees tracked by `EVENT_SCHEMA_VERSION`.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct EpochCheckpointEvent {
-    /// Period identifier this checkpoint covers (e.g., `"2026-02"`).
+    /// Period identifier this checkpoint covers (e.g. `"2026-02"`).
     pub period: String,
     /// Merkle root of the most recently committed attestation in this epoch.
     pub state_root: BytesN<32>,
-    /// Cumulative number of attestation submissions recorded for this period.
+    /// Cumulative attestation submissions recorded for this period so far.
     pub submissions_count: u64,
     /// Cumulative protocol fees collected for this period (token smallest units).
     pub fees_collected: i128,
-    /// Ledger timestamp at which this checkpoint was recorded.
+    /// Ledger timestamp when this checkpoint was recorded.
     pub checkpoint_timestamp: u64,
 }
 
 /// Emit an `EpochCheckpoint` event.
 ///
-/// Call this after updating the per-epoch accumulators so the event reflects
-/// the state **after** the current submission is applied.
+/// Call this **after** the per-epoch accumulators have been updated so the
+/// payload always reflects state including the current submission.
 ///
 /// # Arguments
 ///
 /// * `env`               – Soroban execution environment.
-/// * `period`            – Period identifier (e.g., `"2026-02"`).
-/// * `state_root`        – Merkle root of the most recent attestation.
+/// * `period`            – Period identifier (e.g. `"2026-02"`).
+/// * `state_root`        – Merkle root of the attestation just written.
 /// * `submissions_count` – Updated cumulative submission count for this period.
 /// * `fees_collected`    – Updated cumulative fees collected for this period.
 ///
@@ -1147,8 +1150,8 @@ pub struct EpochCheckpointEvent {
 ///
 /// Publishes `(ep_ckpt,)` → `EpochCheckpointEvent`.
 ///
-/// No secondary topic is used; indexers filter on the symbol and the `period`
-/// field in the payload to reconstruct per-epoch history.
+/// No secondary topic is used — indexers reconstruct per-epoch history by
+/// filtering on the `ep_ckpt` symbol and matching the `period` payload field.
 pub fn emit_epoch_checkpoint(
     env: &Env,
     period: &String,

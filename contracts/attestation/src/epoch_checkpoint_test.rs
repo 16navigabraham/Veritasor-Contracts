@@ -1,34 +1,34 @@
-//! # Epoch Checkpoint Event Tests
+//! # Epoch Checkpoint Event — Test Suite
 //!
-//! Validates that `EpochCheckpoint` events are emitted correctly on every
-//! attestation submission and that the per-epoch accumulators (`submissions_count`,
-//! `fees_collected`, `state_root`) reflect the correct cumulative state.
+//! Validates correctness of the `EpochCheckpoint` event emitted after every
+//! attestation submission.
 //!
 //! ## Coverage
 //!
-//! | Scenario | What is tested |
-//! |----------|---------------|
-//! | Single submission | Checkpoint emitted with count=1 and correct fee |
-//! | Zero-fee epoch | Checkpoint emitted with fees_collected=0 |
-//! | Batch submission | One checkpoint per batch item, counts accumulate |
-//! | Multi-period | Each period has independent counters |
-//! | State root | `state_root` matches the submitted Merkle root |
-//! | Timestamp | `checkpoint_timestamp` matches ledger timestamp |
+//! | Test | Scenario |
+//! |------|----------|
+//! | `single_submission` | Checkpoint emitted with count=1, correct root, zero fee |
+//! | `zero_activity` | No checkpoint emitted for a period with no submissions |
+//! | `accumulates_across_submissions` | Counts increase 1→2→3 within the same period |
+//! | `independent_per_period` | Each period starts its own counter at 1 |
+//! | `batch_submission` | One checkpoint per batch item, counts accumulate correctly |
+//! | `state_root_matches` | `state_root` always reflects the submitted Merkle root |
+//! | `checkpoint_timestamp` | `checkpoint_timestamp` matches the ledger timestamp |
 //!
 //! ## Security Assumptions Validated
 //!
-//! - Only the contract can emit `EpochCheckpoint` (via internal submission path).
-//! - Accumulators are monotonically increasing (saturating arithmetic prevents
-//!   overflow-based manipulation).
-//! - `state_root` always matches the most recently submitted Merkle root for
-//!   that period.
+//! - Only the contract submission path can emit `EpochCheckpoint` — no
+//!   external caller can forge one.
+//! - Accumulators are monotonically non-decreasing (saturating arithmetic).
+//! - `state_root` is always the Merkle root of the most recently submitted
+//!   attestation in the period.
 
 extern crate std;
 
 use crate::events::{EpochCheckpointEvent, TOPIC_EPOCH_CHECKPOINT};
-use crate::{AttestationContract, AttestationContractClient};
+use crate::{AttestationContract, AttestationContractClient, BatchAttestationItem};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
-use soroban_sdk::{symbol_short, Address, BytesN, Env, String, TryFromVal};
+use soroban_sdk::{Address, BytesN, Env, String, Symbol, TryFromVal};
 
 // ════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -37,200 +37,158 @@ use soroban_sdk::{symbol_short, Address, BytesN, Env, String, TryFromVal};
 fn setup() -> (Env, AttestationContractClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register(AttestationContract, ());
-    let client = AttestationContractClient::new(&env, &contract_id);
+    let cid = env.register(AttestationContract, ());
+    let client = AttestationContractClient::new(&env, &cid);
     let admin = Address::generate(&env);
     client.initialize(&admin, &0u64);
     (env, client, admin)
 }
 
-fn period(env: &Env, s: &str) -> String {
+fn p(env: &Env, s: &str) -> String {
     String::from_str(env, s)
 }
 
-fn root(env: &Env, byte: u8) -> BytesN<32> {
+fn r(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }
 
-/// Extract `EpochCheckpointEvent` payloads from the event log.
-fn collect_checkpoints(env: &Env, contract_id: &Address) -> std::vec::Vec<EpochCheckpointEvent> {
-    let all = env.events().all();
-    let mut result = std::vec![];
-    for (c_id, topics, data) in all.iter() {
-        if &c_id != contract_id {
-            continue;
-        }
-        // Topics for ep_ckpt is a single-element tuple
-        if topics.len() != 1 {
-            continue;
-        }
-        let topic: soroban_sdk::Val = topics.get(0).unwrap();
-        let sym = soroban_sdk::Symbol::try_from_val(env, &topic);
-        if let Ok(s) = sym {
-            if s == TOPIC_EPOCH_CHECKPOINT {
-                if let Ok(ev) = EpochCheckpointEvent::try_from_val(env, &data) {
-                    result.push(ev);
-                }
+/// Pull all `EpochCheckpointEvent` payloads emitted by `contract_id`.
+fn checkpoints(env: &Env, contract_id: &Address) -> std::vec::Vec<EpochCheckpointEvent> {
+    env.events()
+        .all()
+        .iter()
+        .filter_map(|(cid, topics, data)| {
+            if &cid != contract_id || topics.len() != 1 {
+                return None;
             }
-        }
-    }
-    result
+            let sym = Symbol::try_from_val(env, &topics.get(0).unwrap()).ok()?;
+            if sym != TOPIC_EPOCH_CHECKPOINT {
+                return None;
+            }
+            EpochCheckpointEvent::try_from_val(env, &data).ok()
+        })
+        .collect()
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  1. Single submission — basic checkpoint fields
+//  Tests
 // ════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_epoch_checkpoint_single_submission() {
-    let (env, client, _admin) = setup();
-    let contract_id = client.address.clone();
+fn single_submission() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
     let business = Address::generate(&env);
-    let p = period(&env, "2026-02");
-    let r = root(&env, 0xAB);
 
-    env.ledger().with_mut(|li| li.timestamp = 1_700_000_000);
-
-    client.submit_attestation(&business, &p, &r, &1_700_000_000u64, &1u32, &0i128, &None, &None);
-
-    let checkpoints = collect_checkpoints(&env, &contract_id);
-    assert_eq!(checkpoints.len(), 1, "expected exactly one checkpoint");
-
-    let cp = &checkpoints[0];
-    assert_eq!(cp.period, p, "period mismatch");
-    assert_eq!(cp.state_root, r, "state_root must match submitted Merkle root");
-    assert_eq!(cp.submissions_count, 1, "first submission should set count to 1");
-    assert_eq!(cp.fees_collected, 0i128, "no fees configured → 0");
-    assert_eq!(cp.checkpoint_timestamp, 1_700_000_000u64);
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  2. Zero-activity epoch — no events for an unseen period
-// ════════════════════════════════════════════════════════════════════
-
-#[test]
-fn test_epoch_checkpoint_zero_activity() {
-    let (env, client, _admin) = setup();
-    let contract_id = client.address.clone();
-
-    // Submit to one period only
-    let b = Address::generate(&env);
+    env.ledger().with_mut(|l| l.timestamp = 1_700_000_000);
     client.submit_attestation(
-        &b,
-        &period(&env, "2026-01"),
-        &root(&env, 1),
-        &0u64,
+        &business,
+        &p(&env, "2026-02"),
+        &r(&env, 0xAB),
+        &1_700_000_000u64,
         &1u32,
         &0i128,
         &None,
         &None,
     );
 
-    let checkpoints = collect_checkpoints(&env, &contract_id);
-    // "2026-02" was never touched → no checkpoint for it
-    let for_feb: std::vec::Vec<_> = checkpoints
+    let cps = checkpoints(&env, &cid);
+    assert_eq!(cps.len(), 1);
+    let cp = &cps[0];
+    assert_eq!(cp.period, p(&env, "2026-02"));
+    assert_eq!(cp.state_root, r(&env, 0xAB));
+    assert_eq!(cp.submissions_count, 1);
+    assert_eq!(cp.fees_collected, 0);
+    assert_eq!(cp.checkpoint_timestamp, 1_700_000_000u64);
+}
+
+/// A period that never receives a submission must produce zero checkpoints.
+#[test]
+fn zero_activity_produces_no_checkpoint() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
+
+    // Submit only to "2026-01"
+    let b = Address::generate(&env);
+    client.submit_attestation(&b, &p(&env, "2026-01"), &r(&env, 1), &0, &1, &0, &None, &None);
+
+    let cps = checkpoints(&env, &cid);
+    let for_feb: std::vec::Vec<_> = cps
         .iter()
-        .filter(|c| c.period == period(&env, "2026-02"))
+        .filter(|c| c.period == p(&env, "2026-02"))
         .collect();
     assert!(for_feb.is_empty(), "zero-activity period must produce no checkpoint");
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  3. Multiple submissions in the same period — counters accumulate
-// ════════════════════════════════════════════════════════════════════
-
+/// Submission counts must increase monotonically within the same period.
 #[test]
-fn test_epoch_checkpoint_accumulates_across_submissions() {
-    let (env, client, _admin) = setup();
-    let contract_id = client.address.clone();
-    let p = period(&env, "2026-03");
+fn accumulates_across_submissions() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
 
     for i in 1u8..=3 {
         let b = Address::generate(&env);
-        client.submit_attestation(&b, &p, &root(&env, i), &0u64, &1u32, &0i128, &None, &None);
+        client.submit_attestation(&b, &p(&env, "2026-03"), &r(&env, i), &0, &1, &0, &None, &None);
     }
 
-    let checkpoints = collect_checkpoints(&env, &contract_id);
-    assert_eq!(checkpoints.len(), 3);
-
-    // Counts must be strictly increasing: 1, 2, 3
-    for (idx, cp) in checkpoints.iter().enumerate() {
-        assert_eq!(
-            cp.submissions_count,
-            (idx as u64) + 1,
-            "submission count at index {} should be {}",
-            idx,
-            idx + 1
-        );
-        assert_eq!(cp.period, p);
+    let cps = checkpoints(&env, &cid);
+    assert_eq!(cps.len(), 3);
+    for (idx, cp) in cps.iter().enumerate() {
+        assert_eq!(cp.submissions_count, (idx as u64) + 1, "count at index {}", idx);
+        assert_eq!(cp.period, p(&env, "2026-03"));
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  4. Multiple periods — independent counters
-// ════════════════════════════════════════════════════════════════════
-
+/// Each period must have an independent counter that starts at 1.
 #[test]
-fn test_epoch_checkpoint_independent_per_period() {
-    let (env, client, _admin) = setup();
-    let contract_id = client.address.clone();
+fn independent_per_period() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
 
-    let periods = ["2026-01", "2026-02", "2026-03"];
-    for (i, ps) in periods.iter().enumerate() {
+    for (i, period_str) in ["2026-01", "2026-02", "2026-03"].iter().enumerate() {
         let b = Address::generate(&env);
         client.submit_attestation(
             &b,
-            &period(&env, ps),
-            &root(&env, i as u8),
-            &0u64,
-            &1u32,
-            &0i128,
+            &p(&env, period_str),
+            &r(&env, i as u8),
+            &0,
+            &1,
+            &0,
             &None,
             &None,
         );
     }
 
-    let checkpoints = collect_checkpoints(&env, &contract_id);
-    assert_eq!(checkpoints.len(), 3);
-
-    // Each period's first submission must see count=1
-    for cp in &checkpoints {
-        assert_eq!(cp.submissions_count, 1, "each period starts at count 1");
-        assert_eq!(cp.fees_collected, 0i128);
+    let cps = checkpoints(&env, &cid);
+    assert_eq!(cps.len(), 3);
+    for cp in &cps {
+        assert_eq!(cp.submissions_count, 1, "first submission per period = 1");
+        assert_eq!(cp.fees_collected, 0);
     }
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  5. Batch submission — one checkpoint per item
-// ════════════════════════════════════════════════════════════════════
-
+/// Batch submissions emit one checkpoint per item; counts accumulate in order.
 #[test]
-fn test_epoch_checkpoint_batch_submission() {
-    use crate::BatchAttestationItem;
-    use soroban_sdk::Vec;
-
-    let (env, client, _admin) = setup();
-    let contract_id = client.address.clone();
-    let p = period(&env, "2026-04");
-
-    let b1 = Address::generate(&env);
-    let b2 = Address::generate(&env);
+fn batch_submission_one_checkpoint_per_item() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
+    let period = p(&env, "2026-04");
 
     let items = soroban_sdk::vec![
         &env,
         BatchAttestationItem {
-            business: b1.clone(),
-            period: p.clone(),
-            merkle_root: root(&env, 0x11),
+            business: Address::generate(&env),
+            period: period.clone(),
+            merkle_root: r(&env, 0x11),
             timestamp: 0,
             version: 1,
             proof_hash: None,
             expiry_timestamp: None,
         },
         BatchAttestationItem {
-            business: b2.clone(),
-            period: p.clone(),
-            merkle_root: root(&env, 0x22),
+            business: Address::generate(&env),
+            period: period.clone(),
+            merkle_root: r(&env, 0x22),
             timestamp: 0,
             version: 1,
             proof_hash: None,
@@ -240,43 +198,43 @@ fn test_epoch_checkpoint_batch_submission() {
 
     client.submit_attestations_batch(&items);
 
-    let checkpoints = collect_checkpoints(&env, &contract_id);
-    // Two items in the batch → two checkpoints
-    assert_eq!(checkpoints.len(), 2);
-    assert_eq!(checkpoints[0].submissions_count, 1);
-    assert_eq!(checkpoints[1].submissions_count, 2);
-    assert_eq!(checkpoints[0].state_root, root(&env, 0x11));
-    assert_eq!(checkpoints[1].state_root, root(&env, 0x22));
+    let cps = checkpoints(&env, &cid);
+    assert_eq!(cps.len(), 2, "one checkpoint per batch item");
+    assert_eq!(cps[0].submissions_count, 1);
+    assert_eq!(cps[0].state_root, r(&env, 0x11));
+    assert_eq!(cps[1].submissions_count, 2);
+    assert_eq!(cps[1].state_root, r(&env, 0x22));
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  6. State root reflects the most recently submitted Merkle root
-// ════════════════════════════════════════════════════════════════════
-
+/// `state_root` must always equal the Merkle root that was submitted.
 #[test]
-fn test_epoch_checkpoint_state_root_matches_merkle_root() {
-    let (env, client, _admin) = setup();
-    let contract_id = client.address.clone();
+fn state_root_matches_merkle_root() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
 
-    let roots = [[0xAAu8; 32], [0xBBu8; 32], [0xCCu8; 32]];
-    for (i, r) in roots.iter().enumerate() {
+    let roots = [0xAAu8, 0xBBu8, 0xCCu8];
+    for byte in roots {
         let b = Address::generate(&env);
-        client.submit_attestation(
-            &b,
-            &period(&env, "2026-05"),
-            &BytesN::from_array(&env, r),
-            &0u64,
-            &1u32,
-            &0i128,
-            &None,
-            &None,
-        );
-        let _ = i;
+        client.submit_attestation(&b, &p(&env, "2026-05"), &r(&env, byte), &0, &1, &0, &None, &None);
     }
 
-    let checkpoints = collect_checkpoints(&env, &contract_id);
-    assert_eq!(checkpoints.len(), 3);
-    assert_eq!(checkpoints[0].state_root, BytesN::from_array(&env, &roots[0]));
-    assert_eq!(checkpoints[1].state_root, BytesN::from_array(&env, &roots[1]));
-    assert_eq!(checkpoints[2].state_root, BytesN::from_array(&env, &roots[2]));
+    let cps = checkpoints(&env, &cid);
+    assert_eq!(cps.len(), 3);
+    for (i, &byte) in roots.iter().enumerate() {
+        assert_eq!(cps[i].state_root, r(&env, byte));
+    }
+}
+
+/// `checkpoint_timestamp` must equal the ledger timestamp at submission time.
+#[test]
+fn checkpoint_timestamp_matches_ledger() {
+    let (env, client, _) = setup();
+    let cid = client.address.clone();
+
+    env.ledger().with_mut(|l| l.timestamp = 9_999_999u64);
+    let b = Address::generate(&env);
+    client.submit_attestation(&b, &p(&env, "2026-06"), &r(&env, 1), &0, &1, &0, &None, &None);
+
+    let cps = checkpoints(&env, &cid);
+    assert_eq!(cps[0].checkpoint_timestamp, 9_999_999u64);
 }
