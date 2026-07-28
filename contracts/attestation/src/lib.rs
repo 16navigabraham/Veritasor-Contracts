@@ -62,7 +62,8 @@ pub use dispute::{
 pub use dynamic_fees::{compute_fee, ArchivePointerRecord, DataKey, FeeConfig};
 pub use events::{
     AttestationCleanedUpEvent, AttestationMigratedEvent, AttestationRevokedEvent,
-    AttestationSubmittedEvent, EpochCheckpointEvent, ProofHashUpdatedEvent,
+    AttestationSubmittedEvent, PauseScheduledEvent, PauseScheduledCancelledEvent,
+    ProofHashUpdatedEvent,
 };
 pub use fees::{collect_flat_fee, FlatFeeConfig};
 pub use multisig::{Proposal, ProposalAction, ProposalStatus};
@@ -908,6 +909,7 @@ impl AttestationContract {
     }
 
     pub fn pause(env: Env, caller: Address, nonce: u64) {
+        access_control::check_and_apply_pending_pause(&env);
         access_control::require_admin(&env, &caller);
         replay_protection::verify_and_increment_nonce(&env, &caller, NONCE_CHANNEL_ADMIN, nonce);
         access_control::set_paused(&env, true);
@@ -915,6 +917,7 @@ impl AttestationContract {
     }
 
     pub fn unpause(env: Env, caller: Address, nonce: u64) {
+        access_control::check_and_apply_pending_pause(&env);
         access_control::require_admin(&env, &caller);
         replay_protection::verify_and_increment_nonce(&env, &caller, NONCE_CHANNEL_ADMIN, nonce);
         access_control::set_paused(&env, false);
@@ -923,6 +926,55 @@ impl AttestationContract {
 
     pub fn is_paused(env: Env) -> bool {
         access_control::is_paused(&env)
+    }
+
+    /// Schedule a time-locked pause with a mandatory 1-hour notice window.
+    ///
+    /// The pause will auto-apply on the next state-changing call after `effective_at`.
+    /// The caller must hold the ADMIN role.
+    ///
+    /// # Panics
+    /// - Caller does not have ADMIN role
+    /// - `effective_at` is less than 1 hour from the current ledger timestamp
+    /// - A pending pause is already scheduled (cancel it first)
+    pub fn schedule_pause(env: Env, caller: Address, effective_at: u64, nonce: u64) {
+        access_control::check_and_apply_pending_pause(&env);
+        access_control::require_admin(&env, &caller);
+        replay_protection::verify_and_increment_nonce(&env, &caller, NONCE_CHANNEL_ADMIN, nonce);
+        assert!(
+            effective_at >= env.ledger().timestamp() + 3600,
+            "notice window must be at least 1 hour"
+        );
+        assert!(
+            access_control::get_pending_pause_effective_at(&env).is_none(),
+            "pending pause already scheduled"
+        );
+        access_control::set_pending_pause_effective_at(&env, effective_at);
+        events::emit_pause_scheduled(&env, &caller, effective_at);
+    }
+
+    /// Cancel a previously scheduled time-locked pause.
+    ///
+    /// The caller must hold the ADMIN role.
+    ///
+    /// # Panics
+    /// - Caller does not have ADMIN role
+    /// - No pending pause exists
+    pub fn cancel_scheduled_pause(env: Env, caller: Address, nonce: u64) {
+        access_control::check_and_apply_pending_pause(&env);
+        access_control::require_admin(&env, &caller);
+        replay_protection::verify_and_increment_nonce(&env, &caller, NONCE_CHANNEL_ADMIN, nonce);
+        assert!(
+            access_control::get_pending_pause_effective_at(&env).is_some(),
+            "no pending pause to cancel"
+        );
+        access_control::clear_pending_pause(&env);
+        events::emit_pause_scheduled_cancelled(&env, &caller);
+    }
+
+    /// Returns the effective-at timestamp of a pending scheduled pause, if any.
+    pub fn get_pending_pause_effective_at(env: Env) -> Option<u64> {
+        access_control::get_pending_pause_effective_at(&env)
     }
 
     // ── Multisig governance ─────────────────────────────────────────
@@ -1760,10 +1812,12 @@ impl AttestationContract {
     fn dispatch_multisig_action(env: &Env, executor: &Address, action: &ProposalAction) {
         match action {
             ProposalAction::Pause => {
+                access_control::check_and_apply_pending_pause(env);
                 access_control::set_paused(env, true);
                 events::emit_paused(env, executor);
             }
             ProposalAction::Unpause => {
+                access_control::check_and_apply_pending_pause(env);
                 access_control::set_paused(env, false);
                 events::emit_unpaused(env, executor);
             }
@@ -1925,7 +1979,7 @@ mod multi_period_test;
 mod multisig_e2e_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod multisig_test;
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(test)]
 mod pause_test;
 #[cfg(all(test, feature = "full-tests"))]
 mod proof_hash_test;

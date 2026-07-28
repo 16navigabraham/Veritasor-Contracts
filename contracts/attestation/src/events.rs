@@ -129,9 +129,10 @@ pub const TOPIC_BIZ_SUSPENDED: Symbol = symbol_short!("biz_sus");
 pub const TOPIC_BIZ_REACTIVATE: Symbol = symbol_short!("biz_rea");
 /// Topic: proof hash updated
 pub const TOPIC_PROOF_HASH_UPDATED: Symbol = symbol_short!("ph_upd");
-/// Topic: epoch checkpoint — emitted on every submission for deterministic
-/// third-party replay of per-epoch state.
-pub const TOPIC_EPOCH_CHECKPOINT: Symbol = symbol_short!("ep_ckpt");
+/// Topic: pause scheduled
+pub const TOPIC_PAUSE_SCHEDULED: Symbol = symbol_short!("p_sch");
+/// Topic: scheduled pause cancelled
+pub const TOPIC_PAUSE_SCHEDULED_CANCELLED: Symbol = symbol_short!("p_canc");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -260,6 +261,24 @@ pub struct RoleChangedEvent {
 pub struct PauseChangedEvent {
     /// Address that triggered the pause state change.
     pub changed_by: Address,
+}
+
+/// Normalized payload for `PauseScheduled` events.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PauseScheduledEvent {
+    /// Address that scheduled the pause.
+    pub caller: Address,
+    /// Timestamp at which the pause becomes effective.
+    pub effective_at: u64,
+}
+
+/// Normalized payload for `PauseScheduledCancelled` events.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PauseScheduledCancelledEvent {
+    /// Address that cancelled the scheduled pause.
+    pub caller: Address,
 }
 
 // ── Fee configuration ─────────────────────────────────────────────
@@ -780,6 +799,42 @@ pub fn emit_unpaused(env: &Env, changed_by: &Address) {
         changed_by: changed_by.clone(),
     };
     env.events().publish((TOPIC_UNPAUSED,), event);
+}
+
+/// Emit a `PauseScheduled` event.
+///
+/// # Arguments
+///
+/// * `env`          – Soroban execution environment.
+/// * `caller`       – Address that scheduled the pause.
+/// * `effective_at` – Timestamp when the pause becomes effective.
+///
+/// # Events
+///
+/// Publishes `(p_sch,)` → `PauseScheduledEvent`.
+pub fn emit_pause_scheduled(env: &Env, caller: &Address, effective_at: u64) {
+    let event = PauseScheduledEvent {
+        caller: caller.clone(),
+        effective_at,
+    };
+    env.events().publish((TOPIC_PAUSE_SCHEDULED,), event);
+}
+
+/// Emit a `PauseScheduledCancelled` event.
+///
+/// # Arguments
+///
+/// * `env`    – Soroban execution environment.
+/// * `caller` – Address that cancelled the scheduled pause.
+///
+/// # Events
+///
+/// Publishes `(p_canc,)` → `PauseScheduledCancelledEvent`.
+pub fn emit_pause_scheduled_cancelled(env: &Env, caller: &Address) {
+    let event = PauseScheduledCancelledEvent {
+        caller: caller.clone(),
+    };
+    env.events().publish((TOPIC_PAUSE_SCHEDULED_CANCELLED,), event);
 }
 
 // ── Fee configuration ─────────────────────────────────────────────

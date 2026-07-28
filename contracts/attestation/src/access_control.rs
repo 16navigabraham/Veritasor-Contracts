@@ -58,6 +58,8 @@ pub enum AccessControlKey {
     RoleHolders,
     /// Contract paused state
     Paused,
+    /// Pending pause effective-at timestamp (time-locked pause)
+    PendingPauseEffectiveAt,
     /// Last used nonce per account for replay prevention
     /// Key format: (account_address, nonce_channel_id)
     LastNonce((Address, u32)),
@@ -338,9 +340,48 @@ pub fn set_paused(env: &Env, paused: bool) {
         .set(&AccessControlKey::Paused, &paused);
 }
 
+// ── Time-locked (scheduled) pause ─────────────────────────────────
+
+/// Returns the effective-at timestamp of a pending scheduled pause, if any.
+pub fn get_pending_pause_effective_at(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&AccessControlKey::PendingPauseEffectiveAt)
+}
+
+/// Stores a pending pause effective-at timestamp.
+pub fn set_pending_pause_effective_at(env: &Env, effective_at: u64) {
+    env.storage()
+        .instance()
+        .set(&AccessControlKey::PendingPauseEffectiveAt, &effective_at);
+}
+
+/// Removes any pending pause.
+pub fn clear_pending_pause(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&AccessControlKey::PendingPauseEffectiveAt);
+}
+
+/// If a scheduled pause's effective-at timestamp has been reached,
+/// automatically apply the pause and clear the pending state.
+pub fn check_and_apply_pending_pause(env: &Env) {
+    if let Some(effective_at) = get_pending_pause_effective_at(env) {
+        if env.ledger().timestamp() >= effective_at {
+            set_paused(env, true);
+            clear_pending_pause(env);
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+
 /// Require that the contract is not paused.
 /// Panics if the contract is paused.
+///
+/// Automatically applies any overdue scheduled pause before checking.
 pub fn require_not_paused(env: &Env) {
+    check_and_apply_pending_pause(env);
     assert!(!is_paused(env), "contract is paused");
 }
 
