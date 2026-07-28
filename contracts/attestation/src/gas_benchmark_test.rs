@@ -240,13 +240,243 @@ fn bench_verify_attestation() {
     );
 
     let before = BudgetSnapshot::capture(&env);
-    let result = client.is_revoked(&business, &period);
+    let result = client.verify_attestation(&business, &period, &root);
     let after = BudgetSnapshot::capture(&env);
 
-    assert!(!result); // attestation is active, not revoked
+    assert!(result); // attestation is active, root matches, not revoked
     let cost = before.delta(&after);
     cost.print("verify_attestation");
     cost.assert_within_target("verify_attestation", 200_000, 5_000);
+}
+
+// ── Cold vs Warm Storage Benchmarks ─────────────────────────────────
+//
+// These benchmarks measure verify_attestation across cold and warm
+// storage scenarios to help downstream indexers and lenders plan for
+// realistic worst-case gas at scale.
+//
+// Cold: The target entry has never been read in this ledger — the
+//       first verify_attestation call on a freshly submitted attestation.
+// Warm: The entry has already been accessed via get_attestation so the
+//       ledger cache is populated — the second read.
+
+/// Benchmark verify_attestation on a cold entry (first read in ledger).
+///
+/// This represents the worst-case cost for lenders and indexers that
+/// verify attestations that have never been accessed in the current ledger.
+#[test]
+fn bench_verify_attestation_cold() {
+    let (env, client, _admin) = setup_basic();
+
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-03");
+    let root = BytesN::from_array(&env, &[20u8; 32]);
+
+    // Submit the attestation (entry is now in storage, but cold for reads)
+    client.submit_attestation(
+        &business,
+        &period,
+        &root,
+        &1_700_000_000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
+    );
+
+    // First verify_attestation call — cold read
+    let before = BudgetSnapshot::capture(&env);
+    let result = client.verify_attestation(&business, &period, &root);
+    let after = BudgetSnapshot::capture(&env);
+
+    assert!(result);
+    let cost = before.delta(&after);
+    cost.print("verify_attestation (cold storage)");
+    cost.assert_within_target("verify_attestation (cold)", 250_000, 8_000);
+}
+
+/// Benchmark verify_attestation on a warm entry (previously accessed).
+///
+/// After a prior read warms the ledger cache, subsequent reads are cheaper.
+/// The delta between cold and warm quantifies the ledger I/O savings.
+#[test]
+fn bench_verify_attestation_warm() {
+    let (env, client, _admin) = setup_basic();
+
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-03");
+    let root = BytesN::from_array(&env, &[21u8; 32]);
+
+    client.submit_attestation(
+        &business,
+        &period,
+        &root,
+        &1_700_000_000u64,
+        &1u32,
+        &0i128,
+        &None,
+        &None,
+    );
+
+    // Warm the cache with a read before the benchmark
+    let _ = client.get_attestation(&business, &period);
+
+    // Second verify_attestation call — warm read
+    let before = BudgetSnapshot::capture(&env);
+    let result = client.verify_attestation(&business, &period, &root);
+    let after = BudgetSnapshot::capture(&env);
+
+    assert!(result);
+    let cost = before.delta(&after);
+    cost.print("verify_attestation (warm storage)");
+    cost.assert_within_target("verify_attestation (warm)", 150_000, 5_000);
+}
+
+/// Benchmark verify_attestation against a non-existent entry.
+///
+/// This measures the cost of a failed lookup — the storage read still
+/// occurs but no comparison or revocation check is performed.
+#[test]
+fn bench_verify_attestation_nonexistent() {
+    let (env, client, _admin) = setup_basic();
+
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-99");
+    let root = BytesN::from_array(&env, &[22u8; 32]);
+
+    // No attestation submitted — entry does not exist
+    let before = BudgetSnapshot::capture(&env);
+    let result = client.verify_attestation(&business, &period, &root);
+    let after = BudgetSnapshot::capture(&env);
+
+    assert!(!result);
+    let cost = before.delta(&after);
+    cost.print("verify_attestation (non-existent entry)");
+    cost.assert_within_target("verify_attestation (non-existent)", 150_000, 5_000);
+}
+
+/// Combined cold/warm comparison that measures both in a single test
+/// and prints the delta to guide gas planning for downstream consumers.
+#[test]
+fn bench_verify_attestation_cold_warm_comparison() {
+    std::println!("\n╔════════════════════════════════════════════════════════════════╗");
+    std::println!("║        verify_attestation Cold vs Warm Storage Report          ║");
+    std::println!("╚════════════════════════════════════════════════════════════════╝");
+
+    // ── Cold measurement ──────────────────────────────────────────
+    {
+        let (env, client, _admin) = setup_basic();
+        let business = Address::generate(&env);
+        let period = String::from_str(&env, "2026-04");
+        let root = BytesN::from_array(&env, &[30u8; 32]);
+
+        client.submit_attestation(
+            &business,
+            &period,
+            &root,
+            &1_700_000_000u64,
+            &1u32,
+            &0i128,
+            &None,
+            &None,
+        );
+
+        let before = BudgetSnapshot::capture(&env);
+        let result = client.verify_attestation(&business, &period, &root);
+        let after = BudgetSnapshot::capture(&env);
+        assert!(result);
+
+        let cold = before.delta(&after);
+        cold.print("COLD verify_attestation");
+
+        // ── Warm measurement ──────────────────────────────────────
+        let before = BudgetSnapshot::capture(&env);
+        let result = client.verify_attestation(&business, &period, &root);
+        let after = BudgetSnapshot::capture(&env);
+        assert!(result);
+
+        let warm = before.delta(&after);
+        warm.print("WARM verify_attestation");
+
+        // ── Delta summary ─────────────────────────────────────────
+        let cold_cpu = cold.cpu_insns;
+        let warm_cpu = warm.cpu_insns;
+        let cold_mem = cold.mem_bytes;
+        let warm_mem = warm.mem_bytes;
+
+        std::println!("\n=== COLD → WARM DELTA ===");
+        if cold_cpu > 0 && warm_cpu > 0 {
+            let cpu_savings = cold_cpu.saturating_sub(warm_cpu);
+            let cpu_savings_pct = if cold_cpu > 0 {
+                (cpu_savings as f64 / cold_cpu as f64) * 100.0
+            } else {
+                0.0
+            };
+            std::println!(
+                "CPU savings: {} ({:.1}% reduction)",
+                cpu_savings,
+                cpu_savings_pct
+            );
+        } else {
+            std::println!(
+                "CPU: cold={} warm={} (delta unavailable in test env)",
+                cold_cpu,
+                warm_cpu
+            );
+        }
+
+        if cold_mem > 0 && warm_mem > 0 {
+            let mem_savings = cold_mem.saturating_sub(warm_mem);
+            let mem_savings_pct = if cold_mem > 0 {
+                (mem_savings as f64 / cold_mem as f64) * 100.0
+            } else {
+                0.0
+            };
+            std::println!(
+                "Memory savings: {} ({:.1}% reduction)",
+                mem_savings,
+                mem_savings_pct
+            );
+        } else {
+            std::println!(
+                "Memory: cold={} warm={} (delta unavailable in test env)",
+                cold_mem,
+                warm_mem
+            );
+        }
+
+        // Publish JSON-formatted metrics for automated consumers
+        std::println!(
+            "{{\"benchmark\": \"verify_attestation_cold_warm\", \"cold_cpu\": {}, \"warm_cpu\": {}, \"cold_mem\": {}, \"warm_mem\": {}}}",
+            cold_cpu, warm_cpu, cold_mem, warm_mem
+        );
+    }
+
+    // ── Non-existent entry measurement ────────────────────────────
+    {
+        let (env, client, _admin) = setup_basic();
+        let business = Address::generate(&env);
+        let period = String::from_str(&env, "2026-99");
+        let root = BytesN::from_array(&env, &[31u8; 32]);
+
+        let before = BudgetSnapshot::capture(&env);
+        let result = client.verify_attestation(&business, &period, &root);
+        let after = BudgetSnapshot::capture(&env);
+        assert!(!result);
+
+        let cost = before.delta(&after);
+        cost.print("verify_attestation (non-existent)");
+
+        std::println!(
+            "{{\"benchmark\": \"verify_attestation_nonexistent\", \"cpu\": {}, \"mem\": {}}}",
+            cost.cpu_insns,
+            cost.mem_bytes
+        );
+    }
+
+    std::println!("\nSecurity note: verify_attestation is read-only and requires no auth.");
+    std::println!("Warm reads benefit from Soroban's ledger entry cache, reducing I/O cost.");
+    std::println!("Downstream consumers should budget for cold reads as worst-case.");
 }
 
 #[test]
@@ -879,6 +1109,10 @@ fn bench_summary_report() {
     std::println!("  • migrate_attestation:           < 400k / < 10k");
     std::println!("  • get_attestation:               < 100k / < 3k");
     std::println!("  • get_admin:                     < 150k / < 5k");
+    std::println!("\n## Cold vs Warm Storage (verify_attestation)");
+    std::println!("  • verify_attestation (cold):          < 250k / < 8k");
+    std::println!("  • verify_attestation (warm):          < 150k / < 5k");
+    std::println!("  • verify_attestation (non-existent):  < 150k / < 5k");
     std::println!("\nRegression threshold: 150% of target values");
     std::println!("\nFor detailed results, run:");
     std::println!("  cargo test --test gas_benchmark_test -- --nocapture\n");
