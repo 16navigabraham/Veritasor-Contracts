@@ -1,371 +1,424 @@
-#![cfg(test)]
-//! Tests for restore_dry_run and restore_commit.
+//! Tests for the attestation snapshot contract: recording, querying, commitment
+//! export, epoch finalization, attestation validation, edge cases.
 //!
-//! Security assumptions validated:
-//! - dry-run is side-effect-free on business state.
-//! - duplicate (business, period) keys are rejected.
-//! - future-dated recorded_at values are rejected.
-//! - non-monotonic recorded_at for the same business is rejected.
-//! - batch hash mismatch between dry-run and commit is rejected.
-//! - expired pending token is rejected.
-//! - non-admin cannot call dry-run or commit.
-//! - commit without prior dry-run is rejected.
-//! - finalized epochs are skipped during commit (not rejected).
-//! - token is consumed after one commit (no double-commit).
+//! The snapshot commitment tests verify that `export_snapshot_commitment()`
+//! returns a deterministic hash that can be independently recomputed by an
+//! off-chain verifier CLI.
 
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Env, String, Vec,
-};
+use super::*;
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{Address, Env, String};
 
-use crate::{
-    AttestationSnapshotContract, AttestationSnapshotContractClient, RestoreEntry,
-    SnapshotRecord, RESTORE_COMMIT_WINDOW_LEDGERS,
-};
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn setup() -> (Env, AttestationSnapshotContractClient<'static>, Address) {
+fn setup_snapshot_only() -> (Env, AttestationSnapshotContractClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, AttestationSnapshotContract);
+    let contract_id = env.register(AttestationSnapshotContract, ());
     let client = AttestationSnapshotContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin, &None);
+    client.initialize(&admin, &None::<Address>);
     (env, client, admin)
 }
 
-fn make_record(env: &Env, period: &str, recorded_at: u64) -> SnapshotRecord {
-    SnapshotRecord {
-        period: String::from_str(env, period),
-        trailing_revenue: 1_000_000,
-        anomaly_count: 0,
-        attestation_count: 1,
-        recorded_at,
-    }
-}
-
-fn make_entry(env: &Env, business: &Address, period: &str, recorded_at: u64) -> RestoreEntry {
-    RestoreEntry {
-        business: business.clone(),
-        period: String::from_str(env, period),
-        record: make_record(env, period, recorded_at),
-    }
-}
-
-fn vec_of(env: &Env, entries: &[RestoreEntry]) -> Vec<RestoreEntry> {
-    let mut v: Vec<RestoreEntry> = Vec::new(env);
-    for e in entries {
-        v.push_back(e.clone());
-    }
-    v
-}
-
-// ── Basic dry-run pass ────────────────────────────────────────────────────────
+// ── Initialization ───────────────────────────────────────────────────
 
 #[test]
-fn dry_run_clean_batch_returns_ready() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz, "2026-01", 0),
-        make_entry(&env, &biz, "2026-02", 0),
-    ]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(report.ready_to_commit);
-    assert_eq!(report.entries_checked, 2);
-    assert_eq!(report.entries_valid, 2);
-    assert_eq!(report.violations.len(), 0);
-    assert!(report.commit_deadline_ledger > 0);
+fn test_initialize() {
+    let (_env, client, admin) = setup_snapshot_only();
+    assert_eq!(client.get_admin(), admin);
+    assert!(client.get_attestation_contract().is_none());
 }
 
 #[test]
-fn dry_run_stores_no_snapshot_state() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-
-    client.restore_dry_run(&admin, &entries);
-
-    // Business state must be untouched after dry-run.
-    let snap = client.get_snapshot(&biz, &String::from_str(&env, "2026-01"));
-    assert!(snap.is_none(), "dry-run must not write business snapshot state");
-}
-
-// ── Invariant: duplicate keys ─────────────────────────────────────────────────
-
-#[test]
-fn dry_run_rejects_duplicate_keys() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz, "2026-01", 0),
-        make_entry(&env, &biz, "2026-01", 0), // duplicate
-    ]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(!report.ready_to_commit);
-    assert_eq!(report.violations.len(), 1);
-    assert_eq!(report.violations.get(0).unwrap().index, 1);
-}
-
-// ── Invariant: future-dated recorded_at ──────────────────────────────────────
-
-#[test]
-fn dry_run_rejects_future_recorded_at() {
-    let (env, client, admin) = setup();
-    env.ledger().set_timestamp(1000);
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 9999)]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(!report.ready_to_commit);
-    assert_eq!(report.violations.len(), 1);
-    assert_eq!(report.violations.get(0).unwrap().index, 0);
-}
-
-// ── Invariant: non-monotonic nonces ──────────────────────────────────────────
-
-#[test]
-fn dry_run_rejects_non_monotonic_timestamps() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz, "2026-01", 100),
-        make_entry(&env, &biz, "2026-02", 50), // goes backwards
-    ]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(!report.ready_to_commit);
-    assert_eq!(report.violations.len(), 1);
-    assert_eq!(report.violations.get(0).unwrap().index, 1);
+fn test_initialize_with_attestation_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let snap_id = env.register(AttestationSnapshotContract, ());
+    let client = AttestationSnapshotContractClient::new(&env, &snap_id);
+    let admin = Address::generate(&env);
+    let att_id = Address::generate(&env);
+    client.initialize(&admin, &Some(att_id.clone()));
+    assert_eq!(client.get_attestation_contract(), Some(att_id));
 }
 
 #[test]
-fn dry_run_allows_equal_timestamps_same_business() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz, "2026-01", 100),
-        make_entry(&env, &biz, "2026-02", 100), // equal is non-decreasing — OK
-    ]);
+#[should_panic(expected = "already initialized")]
+fn test_initialize_twice_panics() {
+    let (_env, client, admin) = setup_snapshot_only();
+    client.initialize(&admin, &None::<Address>);
+}
 
-    let report = client.restore_dry_run(&admin, &entries);
-    assert!(report.ready_to_commit);
+// ── Recording without attestation contract ───────────────────────────
+
+#[test]
+fn test_record_and_get_snapshot_no_attestation_contract() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-02");
+    client.record_snapshot(&admin, &business, &period, &100_000i128, &2u32, &5u64);
+    let record = client.get_snapshot(&business, &period).unwrap();
+    assert_eq!(record.period, period);
+    assert_eq!(record.trailing_revenue, 100_000i128);
+    assert_eq!(record.anomaly_count, 2u32);
+    assert_eq!(record.attestation_count, 5u64);
 }
 
 #[test]
-fn dry_run_monotonicity_is_per_business() {
-    let (env, client, admin) = setup();
+fn test_record_overwrites_same_period() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-02");
+    client.record_snapshot(&admin, &business, &period, &100_000i128, &2u32, &5u64);
+    client.record_snapshot(&admin, &business, &period, &200_000i128, &3u32, &6u64);
+    let record = client.get_snapshot(&business, &period).unwrap();
+    assert_eq!(record.trailing_revenue, 200_000i128);
+    assert_eq!(record.anomaly_count, 3u32);
+    assert_eq!(record.attestation_count, 6u64);
+}
+
+#[test]
+fn test_get_snapshots_for_business() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let p1 = String::from_str(&env, "2026-01");
+    let p2 = String::from_str(&env, "2026-02");
+    client.record_snapshot(&admin, &business, &p1, &50_000i128, &0u32, &1u64);
+    client.record_snapshot(&admin, &business, &p2, &100_000i128, &1u32, &2u64);
+    let snapshots = client.get_snapshots_for_business(&business);
+    assert_eq!(snapshots.len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "caller must be admin or writer")]
+fn test_record_unauthorized_panics() {
+    let (env, client, _admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-02");
+    let other = Address::generate(&env);
+    client.record_snapshot(&other, &business, &period, &100_000i128, &0u32, &0u64);
+}
+
+// ── Writer role ───────────────────────────────────────────────────────
+
+#[test]
+fn test_writer_can_record() {
+    let (env, client, admin) = setup_snapshot_only();
+    let writer = Address::generate(&env);
+    client.add_writer(&admin, &writer);
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-02");
+    client.record_snapshot(&writer, &business, &period, &50_000i128, &0u32, &0u64);
+    assert!(client.get_snapshot(&business, &period).is_some());
+}
+
+#[test]
+fn test_remove_writer() {
+    let (env, client, admin) = setup_snapshot_only();
+    let writer = Address::generate(&env);
+    client.add_writer(&admin, &writer);
+    assert!(client.is_writer(&writer));
+    client.remove_writer(&admin, &writer);
+    assert!(!client.is_writer(&writer));
+}
+
+// ── Epoch finalization ────────────────────────────────────────────────
+
+#[test]
+fn test_finalize_epoch() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let epoch = String::from_str(&env, "2026-01");
+    client.record_snapshot(&admin, &business, &epoch, &100_000i128, &0u32, &1u64);
+    client.finalize_epoch(&admin, &epoch);
+    let fin = client.get_epoch_finalization(&epoch).unwrap();
+    assert_eq!(fin.epoch, epoch);
+    assert_eq!(fin.snapshot_count, 1);
+    assert_eq!(fin.finalized_by, admin);
+}
+
+#[test]
+#[should_panic(expected = "epoch already finalized")]
+fn test_record_after_finalization_panics() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let epoch = String::from_str(&env, "2026-01");
+    client.record_snapshot(&admin, &business, &epoch, &100_000i128, &0u32, &1u64);
+    client.finalize_epoch(&admin, &epoch);
+    client.record_snapshot(&admin, &business, &epoch, &200_000i128, &0u32, &2u64);
+}
+
+// ── Snapshot commitment ───────────────────────────────────────────────
+
+#[test]
+fn test_commitment_empty_contract() {
+    let (_env, client, _admin) = setup_snapshot_only();
+    let commitment = client.export_snapshot_commitment();
+    assert_eq!(commitment.len(), 32);
+}
+
+#[test]
+fn test_commitment_is_deterministic_empty() {
+    let (_env, client, _admin) = setup_snapshot_only();
+    let c1 = client.export_snapshot_commitment();
+    let c2 = client.export_snapshot_commitment();
+    assert_eq!(c1, c2);
+}
+
+#[test]
+fn test_commitment_changes_after_new_snapshot() {
+    let (env, client, admin) = setup_snapshot_only();
+    let before = client.export_snapshot_commitment();
+
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    client.record_snapshot(&admin, &business, &period, &100_000i128, &0u32, &1u64);
+
+    let after = client.export_snapshot_commitment();
+    assert_ne!(before, after);
+}
+
+#[test]
+fn test_commitment_is_deterministic_after_record() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    client.record_snapshot(&admin, &business, &period, &100_000i128, &0u32, &1u64);
+
+    let c1 = client.export_snapshot_commitment();
+    let c2 = client.export_snapshot_commitment();
+    assert_eq!(c1, c2);
+}
+
+#[test]
+fn test_commitment_changes_on_overwrite() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-01");
+    client.record_snapshot(&admin, &business, &period, &100_000i128, &0u32, &1u64);
+    let before = client.export_snapshot_commitment();
+
+    // Overwrite with different data
+    client.record_snapshot(&admin, &business, &period, &200_000i128, &5u32, &2u64);
+    let after = client.export_snapshot_commitment();
+    assert_ne!(before, after);
+}
+
+#[test]
+fn test_commitment_with_multiple_businesses_and_epochs() {
+    let (env, client, admin) = setup_snapshot_only();
+    let biz1 = Address::generate(&env);
+    let biz2 = Address::generate(&env);
+
+    // Two businesses in epoch "2026-01"
+    client.record_snapshot(
+        &admin,
+        &biz1,
+        &String::from_str(&env, "2026-01"),
+        &100_000i128,
+        &0u32,
+        &1u64,
+    );
+    client.record_snapshot(
+        &admin,
+        &biz2,
+        &String::from_str(&env, "2026-01"),
+        &200_000i128,
+        &1u32,
+        &2u64,
+    );
+
+    // One business in epoch "2026-02"
+    client.record_snapshot(
+        &admin,
+        &biz1,
+        &String::from_str(&env, "2026-02"),
+        &300_000i128,
+        &0u32,
+        &3u64,
+    );
+
+    let commitment = client.export_snapshot_commitment();
+    assert_eq!(commitment.len(), 32);
+
+    // Verify determinism
+    let c2 = client.export_snapshot_commitment();
+    assert_eq!(commitment, c2);
+}
+
+#[test]
+fn test_commitment_order_matters() {
+    // Use a single contract: record biz_a then biz_b and capture C1.
+    let (env, client, admin) = setup_snapshot_only();
     let biz_a = Address::generate(&env);
     let biz_b = Address::generate(&env);
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz_a, "2026-01", 50),
-        make_entry(&env, &biz_b, "2026-01", 200),
-        make_entry(&env, &biz_a, "2026-02", 100), // OK for biz_a (50 → 100)
-        make_entry(&env, &biz_b, "2026-02", 100), // bad for biz_b (200 → 100)
-    ]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(!report.ready_to_commit);
-    assert_eq!(report.violations.len(), 1);
-    assert_eq!(report.violations.get(0).unwrap().index, 3);
-}
-
-// ── Commit: happy path ────────────────────────────────────────────────────────
-
-#[test]
-fn commit_writes_state_after_clean_dry_run() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-    assert!(report.ready_to_commit);
-
-    client.restore_commit(&admin, &entries);
-
-    let snap = client.get_snapshot(&biz, &String::from_str(&env, "2026-01"));
-    assert!(snap.is_some(), "snapshot must exist after commit");
-    assert_eq!(snap.unwrap().trailing_revenue, 1_000_000);
-}
-
-// ── Commit: hash mismatch ─────────────────────────────────────────────────────
-
-#[test]
-#[should_panic(expected = "snapshot_bytes hash mismatch")]
-fn commit_rejects_altered_batch() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries_a = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-    let entries_b = vec_of(&env, &[make_entry(&env, &biz, "2026-02", 0)]);
-
-    client.restore_dry_run(&admin, &entries_a);
-    client.restore_commit(&admin, &entries_b); // different batch — must panic
-}
-
-// ── Commit: no prior dry-run ──────────────────────────────────────────────────
-
-#[test]
-#[should_panic(expected = "no pending restore")]
-fn commit_without_dry_run_panics() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-    client.restore_commit(&admin, &entries);
-}
-
-// ── Commit: expired token ─────────────────────────────────────────────────────
-
-#[test]
-#[should_panic(expected = "pending restore token has expired")]
-fn commit_after_expiry_panics() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-
-    client.restore_dry_run(&admin, &entries);
-
-    env.ledger().set_sequence_number(
-        env.ledger().sequence() + RESTORE_COMMIT_WINDOW_LEDGERS + 1,
-    );
-
-    client.restore_commit(&admin, &entries);
-}
-
-// ── Commit: token consumed (no double-commit) ─────────────────────────────────
-
-#[test]
-#[should_panic(expected = "no pending restore")]
-fn commit_is_one_shot() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-
-    client.restore_dry_run(&admin, &entries);
-    client.restore_commit(&admin, &entries); // first succeeds
-    client.restore_commit(&admin, &entries); // second must panic
-}
-
-// ── Commit: finalized epoch entries skipped ───────────────────────────────────
-
-#[test]
-fn commit_skips_finalized_epoch_entries() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
 
     client.record_snapshot(
-        &admin, &biz,
+        &admin,
+        &biz_a,
         &String::from_str(&env, "2026-01"),
-        &500_000_i128, &0u32, &1u64,
+        &100_000i128,
+        &0u32,
+        &1u64,
     );
-    client.finalize_epoch(&admin, &String::from_str(&env, "2026-01"));
+    client.record_snapshot(
+        &admin,
+        &biz_b,
+        &String::from_str(&env, "2026-01"),
+        &200_000i128,
+        &0u32,
+        &1u64,
+    );
+    let commitment_ab = client.export_snapshot_commitment();
 
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz, "2026-01", 0), // finalized — skipped
-        make_entry(&env, &biz, "2026-02", 0), // not finalized — written
-    ]);
+    // Re-order: record biz_b then biz_a in the same epoch.
+    // We need a separate contract because order is set at record-time.
+    let env2 = Env::default();
+    env2.mock_all_auths();
+    let contract_id2 = env2.register(AttestationSnapshotContract, ());
+    let client2 = AttestationSnapshotContractClient::new(&env2, &contract_id2);
+    let admin2 = Address::generate(&env2);
+    client2.initialize(&admin2, &None::<Address>);
 
-    let report = client.restore_dry_run(&admin, &entries);
-    assert!(report.ready_to_commit);
+    // Generate *new* addresses bound to env2 with the same semantic values.
+    // (We cannot re-use Address objects from env across environments in Soroban.)
+    let biz_b2 = Address::generate(&env2);
+    let biz_a2 = Address::generate(&env2);
 
-    client.restore_commit(&admin, &entries);
+    client2.record_snapshot(
+        &admin2,
+        &biz_b2,
+        &String::from_str(&env2, "2026-01"),
+        &200_000i128,
+        &0u32,
+        &1u64,
+    );
+    client2.record_snapshot(
+        &admin2,
+        &biz_a2,
+        &String::from_str(&env2, "2026-01"),
+        &100_000i128,
+        &0u32,
+        &1u64,
+    );
+    let commitment_ba = client2.export_snapshot_commitment();
 
-    // "2026-01" retains original value.
-    let snap_01 = client.get_snapshot(&biz, &String::from_str(&env, "2026-01")).unwrap();
-    assert_eq!(snap_01.trailing_revenue, 500_000);
-
-    // "2026-02" was written by the restore.
-    assert!(client.get_snapshot(&biz, &String::from_str(&env, "2026-02")).is_some());
+    // Different insertion order => different commitment
+    assert_ne!(commitment_ab, commitment_ba);
 }
 
-// ── Non-admin access control ──────────────────────────────────────────────────
+// ── Epoch listing ─────────────────────────────────────────────────────
+
+#[test]
+fn test_get_all_epochs_empty() {
+    let (_env, client, _admin) = setup_snapshot_only();
+    let epochs = client.get_all_epochs(&0u32, &10u32);
+    assert_eq!(epochs.len(), 0);
+    assert_eq!(client.get_total_epoch_count(), 0u32);
+}
+
+#[test]
+fn test_get_all_epochs_with_data() {
+    let (env, client, admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+
+    client.record_snapshot(
+        &admin,
+        &business,
+        &String::from_str(&env, "2026-01"),
+        &100_000i128,
+        &0u32,
+        &1u64,
+    );
+    client.record_snapshot(
+        &admin,
+        &business,
+        &String::from_str(&env, "2026-02"),
+        &200_000i128,
+        &0u32,
+        &2u64,
+    );
+    client.record_snapshot(
+        &admin,
+        &business,
+        &String::from_str(&env, "2026-03"),
+        &300_000i128,
+        &0u32,
+        &3u64,
+    );
+
+    assert_eq!(client.get_total_epoch_count(), 3u32);
+
+    let epochs_all = client.get_all_epochs(&0u32, &0u32); // page_size=0 returns all
+    assert_eq!(epochs_all.len(), 3);
+
+    let epochs_page1 = client.get_all_epochs(&0u32, &2u32);
+    assert_eq!(epochs_page1.len(), 2);
+
+    let epochs_page2 = client.get_all_epochs(&1u32, &2u32);
+    assert_eq!(epochs_page2.len(), 1);
+}
+
+#[test]
+fn test_get_all_epochs_duplicate_epochs_not_reindexed() {
+    let (env, client, admin) = setup_snapshot_only();
+    let biz1 = Address::generate(&env);
+    let biz2 = Address::generate(&env);
+
+    // Both businesses record for the same epoch
+    client.record_snapshot(
+        &admin,
+        &biz1,
+        &String::from_str(&env, "2026-01"),
+        &100_000i128,
+        &0u32,
+        &1u64,
+    );
+    client.record_snapshot(
+        &admin,
+        &biz2,
+        &String::from_str(&env, "2026-01"),
+        &200_000i128,
+        &0u32,
+        &2u64,
+    );
+
+    assert_eq!(client.get_total_epoch_count(), 1u32);
+    let epochs = client.get_all_epochs(&0u32, &10u32);
+    assert_eq!(epochs.len(), 1);
+    assert_eq!(epochs.get(0).unwrap(), String::from_str(&env, "2026-01"));
+}
+
+// ── Edge cases ────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_snapshot_missing_returns_none() {
+    let (env, client, _admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let period = String::from_str(&env, "2026-99");
+    assert!(client.get_snapshot(&business, &period).is_none());
+}
+
+#[test]
+fn test_get_snapshots_for_business_empty() {
+    let (env, client, _admin) = setup_snapshot_only();
+    let business = Address::generate(&env);
+    let snapshots = client.get_snapshots_for_business(&business);
+    assert_eq!(snapshots.len(), 0);
+}
+
+#[test]
+fn test_set_attestation_contract() {
+    let (env, client, admin) = setup_snapshot_only();
+    let att_id = Address::generate(&env);
+    client.set_attestation_contract(&admin, &Some(att_id.clone()));
+    assert_eq!(client.get_attestation_contract(), Some(att_id));
+    client.set_attestation_contract(&admin, &None::<Address>);
+    assert!(client.get_attestation_contract().is_none());
+}
 
 #[test]
 #[should_panic(expected = "caller is not admin")]
-fn non_admin_cannot_call_dry_run() {
-    let (env, client, _admin) = setup();
-    let attacker = Address::generate(&env);
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-    client.restore_dry_run(&attacker, &entries);
-}
-
-#[test]
-#[should_panic(expected = "caller is not admin")]
-fn non_admin_cannot_call_commit() {
-    let (env, client, admin) = setup();
-    let attacker = Address::generate(&env);
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-    client.restore_dry_run(&admin, &entries);
-    client.restore_commit(&attacker, &entries);
-}
-
-// ── get_pending_restore ───────────────────────────────────────────────────────
-
-#[test]
-fn get_pending_restore_returns_none_before_dry_run() {
-    let (env, client, admin) = setup();
-    assert!(client.get_pending_restore(&admin).is_none());
-}
-
-#[test]
-fn get_pending_restore_returns_token_after_dry_run() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-    client.restore_dry_run(&admin, &entries);
-    assert!(client.get_pending_restore(&admin).is_some());
-}
-
-#[test]
-fn get_pending_restore_returns_none_after_commit() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 0)]);
-    client.restore_dry_run(&admin, &entries);
-    client.restore_commit(&admin, &entries);
-    assert!(client.get_pending_restore(&admin).is_none());
-}
-
-// ── Failed dry-run does not store token ──────────────────────────────────────
-
-#[test]
-fn failed_dry_run_does_not_store_token() {
-    let (env, client, admin) = setup();
-    let biz = Address::generate(&env);
-    env.ledger().set_timestamp(0);
-    let entries = vec_of(&env, &[make_entry(&env, &biz, "2026-01", 9999)]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(!report.ready_to_commit);
-    assert!(client.get_pending_restore(&admin).is_none());
-}
-
-// ── Multiple violations reported together ────────────────────────────────────
-
-#[test]
-fn dry_run_reports_all_violations() {
-    let (env, client, admin) = setup();
-    env.ledger().set_timestamp(500);
-    let biz = Address::generate(&env);
-    let entries = vec_of(&env, &[
-        make_entry(&env, &biz, "2026-01", 0),
-        make_entry(&env, &biz, "2026-01", 0), // dup at index 1
-        make_entry(&env, &biz, "2026-02", 9999), // future at index 2
-    ]);
-
-    let report = client.restore_dry_run(&admin, &entries);
-
-    assert!(!report.ready_to_commit);
-    // Both violations should be present (dup + future).
-    assert_eq!(report.violations.len(), 2);
+fn test_set_attestation_contract_non_admin_panics() {
+    let (_env, client, _admin) = setup_snapshot_only();
+    let other = Address::generate(&_env);
+    client.set_attestation_contract(&other, &None::<Address>);
 }

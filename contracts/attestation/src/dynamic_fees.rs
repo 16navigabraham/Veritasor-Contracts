@@ -116,6 +116,14 @@ pub enum DataKey {
     /// Stores a `Vec<u64>` of ledger timestamps.
     SubmissionTimestamps(Address),
     IsPaused,
+
+    // ── Epoch checkpointing ────────────────────────────────────
+    /// Cumulative submission count for a given period (epoch).
+    /// Keyed by period string (e.g. `"2026-02"`).
+    EpochSubmissions(soroban_sdk::String),
+    /// Cumulative fees collected for a given period (epoch).
+    /// Keyed by period string.
+    EpochFeesCollected(soroban_sdk::String),
 }
 
 /// On-chain fee configuration.
@@ -409,77 +417,51 @@ pub fn collect_fee_from(env: &Env, payer: &Address, business: &Address) -> i128 
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  Epoch Counter
+//  Epoch accumulator helpers
+//
+//  Per-period (epoch) counters that power the EpochCheckpoint event.
+//  Stored in instance storage so they persist across ledger boundaries
+//  and share the contract's TTL budget.
+//
+//  Saturating arithmetic is used throughout: counters can only grow,
+//  preventing overflow-based manipulation that could reset a total and
+//  mislead third-party replayers.
 // ════════════════════════════════════════════════════════════════════
 
-/// Gets the current fee bucket epoch. Returns 0 if never initialized.
-pub fn get_epoch(env: &Env) -> u64 {
+/// Return the cumulative submission count for `period`.  Returns `0` if the
+/// period has never received a submission.
+pub fn get_epoch_submissions(env: &Env, period: &soroban_sdk::String) -> u64 {
     env.storage()
         .instance()
-        .get(&DataKey::EpochCounter)
+        .get(&DataKey::EpochSubmissions(period.clone()))
         .unwrap_or(0u64)
 }
 
-/// Increments the epoch counter by one, persists it, and emits `EpochAdvanced`.
-///
-/// Private — only called from `handle_epoch_rollover`.
-/// Guarantees the counter is strictly monotonically increasing.
-fn advance_epoch(env: &Env) -> u64 {
-    let new_epoch = get_epoch(env) + 1;
+/// Increment the submission count for `period` by `delta` and persist it.
+/// Returns the updated total.
+pub fn increment_epoch_submissions(env: &Env, period: &soroban_sdk::String, delta: u64) -> u64 {
+    let next = get_epoch_submissions(env, period).saturating_add(delta);
     env.storage()
         .instance()
-        .set(&DataKey::EpochCounter, &new_epoch);
-    crate::events::emit_epoch_advanced(env, new_epoch);
-    new_epoch
+        .set(&DataKey::EpochSubmissions(period.clone()), &next);
+    next
 }
 
-/// Checks for a fee-bucket window rollover and advances the epoch counter if
-/// one (or more) windows have elapsed since the last recorded bucket.
-///
-/// Called on every attestation submission (single and batch paths).
-///
-/// ## Algorithm
-///
-/// `LastFeeBucket` stores an `Option<u64>` sentinel:
-/// - `None`  → first-ever call; initialize to the current bucket and emit epoch 1.
-/// - `Some(last)` where `current > last` → `(current - last)` windows elapsed;
-///   advance the epoch once per window and emit one `EpochAdvanced` event each.
-/// - `Some(last)` where `current == last` → same window; no-op.
-///
-/// ## Security invariants
-/// - `EpochCounter` is monotonically non-decreasing; it only ever increases.
-/// - Multiple rollovers in a single transaction each produce a separate event.
-/// - The sentinel uses `has()` rather than a zero-value sentinel so that bucket
-///   index 0 (timestamps 0–86 399 s) is handled correctly without false triggers.
-pub fn handle_epoch_rollover(env: &Env) {
-    let current_bucket = env.ledger().timestamp() / FEE_BUCKET_WINDOW_SECONDS;
-
-    let initialized = env
-        .storage()
-        .instance()
-        .has(&DataKey::LastFeeBucket);
-
-    if !initialized {
-        // First-ever call: record the current bucket and start epoch 1.
-        advance_epoch(env);
-    } else {
-        let last_bucket: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::LastFeeBucket)
-            .unwrap();
-
-        if current_bucket > last_bucket {
-            // One or more full windows have elapsed — advance once per window.
-            for _ in 0..(current_bucket - last_bucket) {
-                advance_epoch(env);
-            }
-        }
-        // current_bucket == last_bucket → same window, nothing to do.
-    }
-
-    // Always persist the current bucket so the next call has a reference point.
+/// Return the cumulative fees collected for `period`.  Returns `0` if the
+/// period has never received a submission.
+pub fn get_epoch_fees_collected(env: &Env, period: &soroban_sdk::String) -> i128 {
     env.storage()
         .instance()
-        .set(&DataKey::LastFeeBucket, &current_bucket);
+        .get(&DataKey::EpochFeesCollected(period.clone()))
+        .unwrap_or(0i128)
+}
+
+/// Add `amount` to the cumulative fee total for `period` and persist it.
+/// Returns the updated total.
+pub fn accumulate_epoch_fees(env: &Env, period: &soroban_sdk::String, amount: i128) -> i128 {
+    let next = get_epoch_fees_collected(env, period).saturating_add(amount);
+    env.storage()
+        .instance()
+        .set(&DataKey::EpochFeesCollected(period.clone()), &next);
+    next
 }
