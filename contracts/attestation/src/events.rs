@@ -132,12 +132,8 @@ pub const TOPIC_BIZ_REACTIVATE: Symbol = symbol_short!("biz_rea");
 pub const TOPIC_PROOF_HASH_UPDATED: Symbol = symbol_short!("ph_upd");
 /// Topic: proposal cleaned up after expiry + grace period
 pub const TOPIC_PROPOSAL_CLEANED: Symbol = symbol_short!("prp_cl");
-/// Topic: vote-weight snapshot captured at proposal creation (issue #512).
-///
-/// Used by off-chain indexers and audit tools to reconstruct the exact
-/// owner set / threshold / total weight that governed a proposal's
-/// approval tally. The snapshot is immutable after creation.
-pub const TOPIC_VOTE_WEIGHT_SNAPSHOT_CREATED: Symbol = symbol_short!("vw_snap");
+/// Topic: slash triggered
+pub const TOPIC_SLASH_TRIGGERED: Symbol = symbol_short!("slsh_trg");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -596,36 +592,13 @@ pub struct ProposalCleanedEvent {
     pub cleaned_at: u32,
 }
 
-/// Normalized payload for `VoteWeightSnapshotCreated` events (issue #512).
-///
-/// Emitted exactly once per proposal at the moment the proposal is
-/// created. Carries enough information for an off-chain indexer to
-/// reconstruct the immutable vote-weight snapshot that governs the
-/// proposal's approval tally, without needing an additional storage
-/// read.
-///
-/// # Storage contract
-///
-/// `owners_count` and `threshold` are duplicated here for indexer
-/// convenience but the snapshot itself lives on-chain at
-/// [`MultisigKey::VoteWeightSnapshot(proposal_id)`] in
-/// `contracts/attestation/src/multisig.rs`.
+/// Normalized payload for `SlashTriggered` events.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct VoteWeightSnapshotCreatedEvent {
-    /// Identifier of the proposal whose snapshot was captured.
-    pub proposal_id: u64,
-    /// Number of owners in the snapshot (== total weight under the
-    /// current 1-owner-1-vote semantics).
-    pub owners_count: u32,
-    /// Approval threshold captured at creation time.
-    pub threshold: u32,
-    /// Ledger sequence at which the snapshot was captured (= proposal
-    /// creation ledger).
-    pub created_at: u32,
-    /// Stable numeric tag for the proposal's `ProposalAction` variant.
-    /// See `multisig::action_tag` for the mapping.
-    pub action_tag: u32,
+pub struct SlashTriggeredEvent {
+    pub attestor: Address,
+    pub amount: i128,
+    pub dispute_id: u64,
 }
 
 // ── Attestation lifecycle ─────────────────────────────────────────
@@ -778,6 +751,22 @@ pub fn emit_attestation_cleaned_up(env: &Env, business: &Address, period: &Strin
     };
     env.events()
         .publish((TOPIC_ATTESTATION_CLEANED_UP, business.clone()), event);
+}
+
+/// Emit a `SlashTriggered` event.
+pub fn emit_slash_triggered(
+    env: &Env,
+    attestor: &Address,
+    amount: i128,
+    dispute_id: u64,
+) {
+    let event = SlashTriggeredEvent {
+        attestor: attestor.clone(),
+        amount,
+        dispute_id,
+    };
+    env.events()
+        .publish((TOPIC_SLASH_TRIGGERED, attestor.clone()), event);
 }
 
 /// Normalized payload for `AttestationExpiryExtended` events.
