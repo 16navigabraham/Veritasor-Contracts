@@ -125,33 +125,89 @@ pub enum DataKey {
     SubmissionTimestamps(Address),
     IsPaused,
 
-    // ── Archival tier ──────────────────────────────────────────
-    /// Full attestation data moved to archive tier, keyed by (business, period).
-    /// Original `Attestation` key is removed after archival.
-    ArchivedAttestation(Address, soroban_sdk::String),
-    /// Lightweight pointer left in active tier after archival, keyed by (business, period).
-    /// Contains the commitment root and a sequential archive index for discoverability.
-    ArchivePointer(Address, soroban_sdk::String),
-    /// Monotonically increasing global archive index counter (u64).
-    /// Incremented once per archived attestation to provide a stable ordinal.
-    ArchiveIndex,
+    // ── Time-locked revocation (grace-window appeal path) ──────
+    /// Pending revocation proposal keyed by (business, period).
+    ///
+    /// Written by `propose_revoke`; removed by either `commit_revoke`
+    /// (on commitment after grace) or `cancel_revoke_proposal` (on appeal).
+    RevokeProposal(Address, soroban_sdk::String),
+    /// Admin-configurable grace window in seconds.
+    ///
+    /// During this window after a proposal is raised, the business (or an
+    /// admin) can cancel it.  After the window elapses anyone can commit
+    /// the revocation.  Defaults to [`DEFAULT_REVOKE_GRACE_SECONDS`] when
+    /// not explicitly configured.
+    RevokeGraceSeconds,
 }
 
-/// Lightweight pointer preserved in the active tier after an attestation is moved
-/// to the archive tier.
+// ════════════════════════════════════════════════════════════════════
+//  Time-locked revocation: grace window
+// ════════════════════════════════════════════════════════════════════
+
+/// Default grace period for the appeal window (86 400 s = 24 h).
 ///
-/// Allows callers to discover that an attestation existed and was archived, and to
-/// retrieve the commitment root without loading the full archived record.
-#[contracttype]
+/// Overridden by [`DataKey::RevokeGraceSeconds`] when the admin calls
+/// `set_revoke_grace_seconds`.
+pub const DEFAULT_REVOKE_GRACE_SECONDS: u64 = 86_400;
+
+/// Pending revocation proposal stored during the appeal grace window.
+///
+/// Stored under [`DataKey::RevokeProposal(business, period)`].
+#[soroban_sdk::contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ArchivePointerRecord {
-    /// The Merkle commitment root from the original attestation (32 bytes).
-    pub merkle_root: soroban_sdk::BytesN<32>,
-    /// Sequential archive index assigned at the time of archival.
-    /// Monotonically increasing across all archived attestations in this contract.
-    pub archive_index: u64,
-    /// Ledger timestamp when the attestation was moved to archive.
-    pub archived_at: u64,
+pub struct RevokeProposal {
+    /// Address that initiated the proposal (business owner or admin).
+    pub proposer: Address,
+    /// Ledger timestamp at which the proposal was submitted.
+    pub proposed_at: u64,
+    /// Human-readable revocation reason carried through to the final record.
+    pub reason: soroban_sdk::String,
+}
+
+/// Return the configured grace window in seconds, falling back to the default.
+pub fn get_revoke_grace_seconds(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RevokeGraceSeconds)
+        .unwrap_or(DEFAULT_REVOKE_GRACE_SECONDS)
+}
+
+/// Set the grace window (admin-only enforcement is the caller's responsibility).
+pub fn set_revoke_grace_seconds(env: &Env, seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RevokeGraceSeconds, &seconds);
+}
+
+/// Store a revoke proposal.
+pub fn store_revoke_proposal(
+    env: &Env,
+    business: &Address,
+    period: &soroban_sdk::String,
+    proposal: &RevokeProposal,
+) {
+    env.storage().instance().set(
+        &DataKey::RevokeProposal(business.clone(), period.clone()),
+        proposal,
+    );
+}
+
+/// Load a revoke proposal, if present.
+pub fn get_revoke_proposal(
+    env: &Env,
+    business: &Address,
+    period: &soroban_sdk::String,
+) -> Option<RevokeProposal> {
+    env.storage()
+        .instance()
+        .get(&DataKey::RevokeProposal(business.clone(), period.clone()))
+}
+
+/// Remove a revoke proposal (after commit or cancel).
+pub fn remove_revoke_proposal(env: &Env, business: &Address, period: &soroban_sdk::String) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::RevokeProposal(business.clone(), period.clone()));
 }
 
 /// On-chain fee configuration.

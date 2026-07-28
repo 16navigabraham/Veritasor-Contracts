@@ -143,10 +143,12 @@ pub const TOPIC_BIZ_SUSPENDED: Symbol = symbol_short!("biz_sus");
 pub const TOPIC_BIZ_REACTIVATE: Symbol = symbol_short!("biz_rea");
 /// Topic: proof hash updated
 pub const TOPIC_PROOF_HASH_UPDATED: Symbol = symbol_short!("ph_upd");
-/// Topic: proposal cleaned up after expiry + grace period
-pub const TOPIC_PROPOSAL_CLEANED: Symbol = symbol_short!("prp_cl");
-/// Topic: slash triggered
-pub const TOPIC_SLASH_TRIGGERED: Symbol = symbol_short!("slsh_trg");
+/// Topic: revocation proposed (grace window started)
+pub const TOPIC_REVOCATION_PROPOSED: Symbol = symbol_short!("rv_prop");
+/// Topic: revocation proposal cancelled (appeal succeeded)
+pub const TOPIC_REVOCATION_CANCELLED: Symbol = symbol_short!("rv_canc");
+/// Topic: revocation committed (grace window elapsed, revocation finalised)
+pub const TOPIC_REVOCATION_COMMITTED: Symbol = symbol_short!("rv_cmmt");
 
 // ════════════════════════════════════════════════════════════════════
 //  Normalized Event Data Structures
@@ -1479,66 +1481,175 @@ pub fn emit_proof_hash_updated(
         .publish((TOPIC_PROOF_HASH_UPDATED, business.clone()), event);
 }
 
-/// Emit a `ProposalCleaned` event.
+// ── Time-locked revocation (grace-window appeal) ──────────────────
+
+/// Normalized payload for `RevocationProposed` events.
 ///
-/// Call this after an expired proposal and its associated storage entries
-/// have been removed.
+/// Emitted when a revocation proposal is registered and the grace window begins.
+/// Off-chain observers (businesses, integrators) should monitor this event to
+/// know when they have a window to appeal.
+///
+/// | Event Catalog | Topic   | Secondary topic |
+/// |---------------|---------|-----------------|
+/// | RevocationProposed | `rv_prop` | `business` |
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RevocationProposedEvent {
+    /// Business whose attestation has been proposed for revocation.
+    pub business: Address,
+    /// Period identifier of the targeted attestation.
+    pub period: String,
+    /// Address that submitted the proposal (business owner or admin).
+    pub proposer: Address,
+    /// Ledger timestamp when the proposal was registered.
+    pub proposed_at: u64,
+    /// Duration of the appeal window in seconds.
+    pub grace_seconds: u64,
+    /// Human-readable revocation reason.
+    pub reason: String,
+}
+
+/// Normalized payload for `RevocationCancelled` events.
+///
+/// Emitted when a pending revocation proposal is cancelled within the grace
+/// window — the attestation remains active.
+///
+/// | Event Catalog | Topic   | Secondary topic |
+/// |---------------|---------|-----------------|
+/// | RevocationCancelled | `rv_canc` | `business` |
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RevocationCancelledEvent {
+    /// Business whose attestation is no longer being revoked.
+    pub business: Address,
+    /// Period identifier of the protected attestation.
+    pub period: String,
+    /// Address that cancelled the proposal (business owner or admin).
+    pub cancelled_by: Address,
+}
+
+/// Normalized payload for `RevocationCommitted` events.
+///
+/// Emitted when the grace window has elapsed and the revocation is finalised.
+/// The attestation is now revoked.
+///
+/// | Event Catalog | Topic   | Secondary topic |
+/// |---------------|---------|-----------------|
+/// | RevocationCommitted | `rv_cmmt` | `business` |
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RevocationCommittedEvent {
+    /// Business whose attestation has been revoked.
+    pub business: Address,
+    /// Period identifier of the revoked attestation.
+    pub period: String,
+    /// Address that originally proposed the revocation.
+    pub proposer: Address,
+    /// Address that called `commit_revoke` to finalise it.
+    pub committed_by: Address,
+    /// Ledger timestamp when the revocation was committed.
+    pub committed_at: u64,
+    /// Human-readable revocation reason.
+    pub reason: String,
+}
+
+/// Emit a `RevocationProposed` event.
+///
+/// # Arguments
+///
+/// * `env`           – Soroban execution environment.
+/// * `business`      – Business whose attestation is proposed for revocation.
+/// * `period`        – Period identifier.
+/// * `proposer`      – Address that raised the proposal.
+/// * `proposed_at`   – Ledger timestamp of the proposal.
+/// * `grace_seconds` – Duration of the appeal window in seconds.
+/// * `reason`        – Revocation reason.
+///
+/// # Events
+///
+/// Publishes `(rv_prop, business)` → `RevocationProposedEvent`.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_revocation_proposed(
+    env: &Env,
+    business: &Address,
+    period: &String,
+    proposer: &Address,
+    proposed_at: u64,
+    grace_seconds: u64,
+    reason: &String,
+) {
+    let event = RevocationProposedEvent {
+        business: business.clone(),
+        period: period.clone(),
+        proposer: proposer.clone(),
+        proposed_at,
+        grace_seconds,
+        reason: reason.clone(),
+    };
+    env.events()
+        .publish((TOPIC_REVOCATION_PROPOSED, business.clone()), event);
+}
+
+/// Emit a `RevocationCancelled` event.
 ///
 /// # Arguments
 ///
 /// * `env`          – Soroban execution environment.
-/// * `proposal_id`  – Unique identifier of the cleaned proposal.
-/// * `action`       – The action that the proposal carried.
-/// * `cleaned_at`   – Ledger sequence number when cleanup occurred.
+/// * `business`     – Business whose revocation proposal was cancelled.
+/// * `period`       – Period identifier.
+/// * `cancelled_by` – Address that cancelled the proposal.
 ///
 /// # Events
 ///
-/// Publishes `(prp_cl,)` → `ProposalCleanedEvent`.
-pub fn emit_proposal_cleaned(env: &Env, proposal_id: u64, action: &ProposalAction, cleaned_at: u32) {
-    let event = ProposalCleanedEvent {
-        proposal_id,
-        action: action.clone(),
-        cleaned_at,
+/// Publishes `(rv_canc, business)` → `RevocationCancelledEvent`.
+pub fn emit_revocation_cancelled(
+    env: &Env,
+    business: &Address,
+    period: &String,
+    cancelled_by: &Address,
+) {
+    let event = RevocationCancelledEvent {
+        business: business.clone(),
+        period: period.clone(),
+        cancelled_by: cancelled_by.clone(),
     };
-    env.events().publish((TOPIC_PROPOSAL_CLEANED,), event);
+    env.events()
+        .publish((TOPIC_REVOCATION_CANCELLED, business.clone()), event);
 }
 
-/// Emit a `VoteWeightSnapshotCreated` event (issue #512).
-///
-/// Call this at proposal creation time, immediately after the snapshot has
-/// been persisted to instance storage. The event is the indexer-facing
-/// record of the snapshot and is the only way off-chain observers learn
-/// the exact owner set / threshold that govern the proposal's tally.
+/// Emit a `RevocationCommitted` event.
 ///
 /// # Arguments
 ///
-/// * `env`            – Soroban execution environment.
-/// * `proposal_id`    – Identifier of the proposal whose snapshot was captured.
-/// * `owners_count`   – Number of owners in the snapshot (= total weight
-///                      under the current 1-owner-1-vote semantics).
-/// * `threshold`      – Approval threshold captured at creation time.
-/// * `created_at`     – Ledger sequence when the snapshot was captured.
-/// * `action_tag`     – Stable numeric tag for the proposal's
-///                      `ProposalAction` variant.
+/// * `env`          – Soroban execution environment.
+/// * `business`     – Business whose attestation was revoked.
+/// * `period`       – Period identifier.
+/// * `proposer`     – Address that originally proposed the revocation.
+/// * `committed_by` – Address that called `commit_revoke`.
+/// * `committed_at` – Ledger timestamp of commitment.
+/// * `reason`       – Revocation reason.
 ///
 /// # Events
 ///
-/// Publishes `(vw_snap,)` → `VoteWeightSnapshotCreatedEvent`.
-pub fn emit_vote_weight_snapshot_created(
+/// Publishes `(rv_cmmt, business)` → `RevocationCommittedEvent`.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_revocation_committed(
     env: &Env,
-    proposal_id: u64,
-    owners_count: u32,
-    threshold: u32,
-    created_at: u32,
-    action_tag: u32,
+    business: &Address,
+    period: &String,
+    proposer: &Address,
+    committed_by: &Address,
+    committed_at: u64,
+    reason: &String,
 ) {
-    let event = VoteWeightSnapshotCreatedEvent {
-        proposal_id,
-        owners_count,
-        threshold,
-        created_at,
-        action_tag,
+    let event = RevocationCommittedEvent {
+        business: business.clone(),
+        period: period.clone(),
+        proposer: proposer.clone(),
+        committed_by: committed_by.clone(),
+        committed_at,
+        reason: reason.clone(),
     };
     env.events()
-        .publish((TOPIC_VOTE_WEIGHT_SNAPSHOT_CREATED,), event);
+        .publish((TOPIC_REVOCATION_COMMITTED, business.clone()), event);
 }
