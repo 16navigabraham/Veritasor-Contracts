@@ -1063,6 +1063,19 @@ impl AttestationContract {
         multisig::is_owner(&env, &address)
     }
 
+    pub fn cleanup_expired_proposals(env: Env, limit: u32) -> u32 {
+        multisig::cleanup_expired_proposals(&env, limit)
+    }
+
+    pub fn set_proposal_expiry_grace(env: Env, caller: Address, grace: u32) {
+        access_control::require_admin(&env, &caller);
+        multisig::set_proposal_expiry_grace(&env, grace);
+    }
+
+    pub fn get_proposal_expiry_grace(env: Env) -> u32 {
+        multisig::get_proposal_expiry_grace(&env)
+    }
+
     /// Admin-gated method to manually bump the instance TTL
     pub fn bump_ttl(env: Env, caller: Address) {
         access_control::require_admin(&env, &caller);
