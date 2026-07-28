@@ -1085,36 +1085,33 @@ pub fn emit_proof_hash_updated(
         .publish((TOPIC_PROOF_HASH_UPDATED, business.clone()), event);
 }
 
-/// Emit an `AttestorLockedForDispute` event.
-///
-/// Call this when a dispute is opened against an attestation so that
-/// the attestor who submitted it is prevented from submitting new
-/// attestations while the dispute is in progress.
+// ── Multisig owner ────────────────────────────────────────────────
+
+/// Topic: multisig owner recovery phrase acknowledged
+pub const TOPIC_OWNER_RECOVERY_PHRASE_ACKNOWLEDGED: Symbol = symbol_short!("own_ack");
+
+/// Normalized payload for `OwnerRecoveryPhraseAcknowledged` events.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct OwnerRecoveryPhraseAcknowledgedEvent {
+    /// The incoming key confirming recovery-phrase custody.
+    pub new_owner: Address,
+}
+
+/// Emit an `OwnerRecoveryPhraseAcknowledged` event.
 ///
 /// # Arguments
 ///
-/// * `env`        – Soroban execution environment.
-/// * `attestor`   – Address of the attestor being locked.
-/// * `business`   – Business address associated with the disputed attestation.
-/// * `period`     – Period identifier of the disputed attestation.
-/// * `dispute_id` – Dispute ID that triggered the lock.
+/// * `env`       - Soroban execution environment.
+/// * `new_owner` - The incoming key confirming recovery-phrase custody.
 ///
 /// # Events
 ///
-/// Publishes `(att_lock, attestor)` → `AttestorLockedForDisputeEvent`.
-pub fn emit_attestor_locked_for_dispute(
-    env: &Env,
-    attestor: &Address,
-    business: &Address,
-    period: &String,
-    dispute_id: u64,
-) {
-    let event = AttestorLockedForDisputeEvent {
-        attestor: attestor.clone(),
-        business: business.clone(),
-        period: period.clone(),
-        dispute_id,
+/// Publishes `(own_ack, new_owner)` → `OwnerRecoveryPhraseAcknowledgedEvent`.
+pub fn emit_owner_recovery_phrase_acknowledged(env: &Env, new_owner: &Address) {
+    let event = OwnerRecoveryPhraseAcknowledgedEvent {
+        new_owner: new_owner.clone(),
     };
     env.events()
-        .publish((TOPIC_ATTESTOR_LOCKED, attestor.clone()), event);
+        .publish((TOPIC_OWNER_RECOVERY_PHRASE_ACKNOWLEDGED, new_owner.clone()), event);
 }
