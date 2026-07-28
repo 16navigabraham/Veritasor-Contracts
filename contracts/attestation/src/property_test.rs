@@ -608,13 +608,7 @@ fn prop_migration_panics_for_non_increasing_version() {
             client.submit_attestation(
                 &business, &period, &old_root, &1_000_000, &old_ver, &0i128, &None, &None,
             );
-            client.migrate_attestation(
-                &admin_addr,
-                &business,
-                &period,
-                &new_root,
-                &bad_new_ver,
-            );
+            client.migrate_attestation(&admin_addr, &business, &period, &new_root, &bad_new_ver);
         }));
 
         let err = result.expect_err(&std::format!(

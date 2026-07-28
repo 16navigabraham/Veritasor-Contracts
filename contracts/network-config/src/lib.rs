@@ -8,8 +8,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String,
-    Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Bytes, Env, String, Vec,
 };
 
 /// Unique identifier for a Stellar network

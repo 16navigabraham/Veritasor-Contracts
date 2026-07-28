@@ -231,8 +231,7 @@ fn test_execute_change_threshold_proposal() {
     assert_eq!(client.get_multisig_threshold(), 2);
 
     // Threshold is 2, so we need 2 approvals
-    let proposal_id =
-        client.create_proposal(&admin, &ProposalAction::ChangeThreshold(1), &0u64);
+    let proposal_id = client.create_proposal(&admin, &ProposalAction::ChangeThreshold(1), &0u64);
     client.approve_proposal(&owner2, &proposal_id, &0u64);
 
     // Verify approved
@@ -249,11 +248,8 @@ fn test_execute_add_owner_proposal() {
     let owner2 = owners.get(1).unwrap();
     let new_owner = Address::generate(&env);
 
-    let proposal_id = client.create_proposal(
-        &admin,
-        &ProposalAction::AddOwner(new_owner.clone()),
-        &0u64,
-    );
+    let proposal_id =
+        client.create_proposal(&admin, &ProposalAction::AddOwner(new_owner.clone()), &0u64);
     client.approve_proposal(&owner2, &proposal_id, &0u64);
     client.execute_proposal(&admin, &proposal_id, &1u64);
 
@@ -267,11 +263,8 @@ fn test_execute_remove_owner_proposal() {
     let owner2 = owners.get(1).unwrap();
     let owner3 = owners.get(2).unwrap();
 
-    let proposal_id = client.create_proposal(
-        &admin,
-        &ProposalAction::RemoveOwner(owner3.clone()),
-        &0u64,
-    );
+    let proposal_id =
+        client.create_proposal(&admin, &ProposalAction::RemoveOwner(owner3.clone()), &0u64);
     client.approve_proposal(&owner2, &proposal_id, &0u64);
     client.execute_proposal(&admin, &proposal_id, &1u64);
 

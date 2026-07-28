@@ -27,7 +27,11 @@ fn fresh_ctx() -> Ctx {
     let client = AttestationContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     client.initialize(&admin, &0u64);
-    Ctx { env, client, _admin: admin }
+    Ctx {
+        env,
+        client,
+        _admin: admin,
+    }
 }
 
 fn deploy_and_fund(env: &Env, to: &Address, amount: i128) -> Address {
